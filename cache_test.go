@@ -78,6 +78,26 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestWriteToBuffer(t *testing.T) {
+	otto.Debug = true
+	cache := otto.New(8, 10)
+
+	value := []byte("hello, world!")
+
+	cache.Set("example", value)
+
+	allocatedByOtto := cache.Get("example", nil)
+	if !bytes.Equal(allocatedByOtto, value) {
+		t.Fatalf("cached value should not be corrupted %v != %v (expected)", allocatedByOtto, value)
+	}
+
+	allocatedByTest := make([]byte, len(value))
+	cache.Get("example", allocatedByTest)
+	if !bytes.Equal(allocatedByTest, value) {
+		t.Fatalf("cached value should not be corrupted %v != %v (expected)", allocatedByOtto, value)
+	}
+}
+
 func random10k(tb testing.TB, cache GenericCache) {
 	r := rand.NewChaCha8([32]byte{0})
 	ri := rand.New(rand.NewPCG(1, 2))

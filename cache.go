@@ -53,7 +53,7 @@ func New(chunkSize, chunkCount int) Cache {
 	mSize := (chunkCount * 90) / 100
 	sSize := chunkCount - mSize
 	return &cache{
-		alloc:      newAllocator(chunkSize, chunkCount),
+		alloc:      newAllocator(chunkSize+entrySize, chunkCount),
 		m:          newQueue[*entry](),
 		s:          newQueue[*entry](),
 		g:          newGhost(mSize),
@@ -93,7 +93,7 @@ func (c *cache) set(hash uint64, val []byte) {
 		first *entry
 	)
 
-	for buf := range slices.Chunk(val, c.chunkSize-entrySize) {
+	for buf := range slices.Chunk(val, c.chunkSize) {
 		chunk := c.alloc.Get()
 		for chunk == nil || c.m.Size()+c.s.Size()+1 > c.chunkCount {
 			c.evict()
@@ -113,7 +113,7 @@ func (c *cache) set(hash uint64, val []byte) {
 			prev.next = chunk
 		}
 
-		chunkBytes := unsafe.Slice(chunk, c.chunkSize)
+		chunkBytes := unsafe.Slice(chunk, c.chunkSize+entrySize)
 		copy(chunkBytes[entrySize:], buf)
 
 		prev = e
@@ -130,10 +130,10 @@ func (c *cache) set(hash uint64, val []byte) {
 
 func (c *cache) Get(key string, buf []byte) []byte {
 	hash := maphash.String(c.seed, key)
-	e, _ := c.hashmap.Load(hash)
+	e, ok := c.hashmap.Load(hash)
 
 	if Debug {
-		fmt.Printf("getting key %s string (hash %d)\n", key, hash)
+		fmt.Printf("getting key %s string (hash %d) ok = %t\n", key, hash, ok)
 	}
 
 	if e == nil {
@@ -159,7 +159,7 @@ func (c *cache) Get(key string, buf []byte) []byte {
 		}
 	}
 
-	buf = read(e, buf, c.chunkSize)
+	buf = c.read(e, buf)
 
 	e.access.Add(-1)
 
@@ -203,7 +203,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	plain := make(map[uint64][]byte)
 	for k, v := range hashmap {
 		if v != nil {
-			plain[k] = read(v, nil, c.chunkSize)
+			plain[k] = c.read(v, nil)
 		} else {
 			plain[k] = nil
 		}
@@ -320,7 +320,30 @@ func (c *cache) evictEntry(node *entry) {
 }
 
 func (c *cache) cost(size int) int {
-	return (size + c.chunkSize - entrySize - 1) / (c.chunkSize - entrySize)
+	return (size + c.chunkSize - 1) / c.chunkSize
+}
+
+func (c *cache) read(e *entry, buf []byte) []byte {
+	if cap(buf) < e.size {
+		buf = make([]byte, e.size)
+	} else {
+		buf = buf[:e.size]
+	}
+
+	chunk := (*byte)(unsafe.Pointer(e))
+	var i int
+	for chunk != nil {
+		e := (*entry)(unsafe.Pointer(chunk))
+		source := unsafe.Slice(chunk, c.chunkSize+entrySize)
+
+		end := min((i+1)*c.chunkSize, e.size)
+		copy(buf[i*c.chunkSize:end], source[entrySize:])
+
+		i += 1
+		chunk = e.next
+	}
+
+	return buf
 }
 
 type entry struct {
@@ -333,26 +356,3 @@ type entry struct {
 }
 
 var entrySize = int(unsafe.Sizeof(entry{}))
-
-func read(e *entry, buf []byte, chunkSize int) []byte {
-	if cap(buf) < e.size {
-		buf = make([]byte, e.size)
-	} else {
-		buf = buf[:e.size]
-	}
-
-	chunk := (*byte)(unsafe.Pointer(e))
-	var i int
-	for chunk != nil {
-		e := (*entry)(unsafe.Pointer(chunk))
-		source := unsafe.Slice(chunk, chunkSize)
-
-		end := min((i+1)*(chunkSize-entrySize), e.size)
-		copy(buf[i*(chunkSize-entrySize):end], source[entrySize:])
-
-		i += 1
-		chunk = e.next
-	}
-
-	return buf
-}
