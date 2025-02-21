@@ -81,7 +81,7 @@ func TestSaveAndLoad(t *testing.T) {
 func TestWriteToBuffer(t *testing.T) {
 	otto.Debug = true
 
-	cache := otto.New(64*1024, 1<<20)
+	cache := otto.New(ChunkSize, ChunkCount)
 
 	value := [434982]byte{0xAA}
 
