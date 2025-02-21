@@ -342,7 +342,7 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 
 	
 	chunk := (*byte)(unsafe.Pointer(e))
-	for i := range chunksToScan {
+	for i := 0; i < chunksToScan && chunk != nil; i++ {
 		e := (*entry)(unsafe.Pointer(chunk))
 		source := unsafe.Slice(chunk, c.chunkSize+entrySize)
 
