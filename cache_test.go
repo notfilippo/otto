@@ -20,39 +20,16 @@ import (
 	"math/rand/v2"
 	"path"
 	"runtime"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/VictoriaMetrics/fastcache"
 	"github.com/notfilippo/otto"
 )
 
-type GenericCache interface {
-	Set(key string, buf []byte)
-	Get(key string, buf []byte) []byte
-}
-
-type FastCacheAdapter struct {
-	inner *fastcache.Cache
-}
-
-func (c *FastCacheAdapter) Set(key string, buf []byte) {
-	c.inner.Set([]byte(key), buf)
-}
-
-func (c *FastCacheAdapter) Get(key string, buf []byte) []byte {
-	return c.inner.Get(buf, []byte(key))
-}
-
 const ChunkSize = 1 << 16
 const ChunkCount = 1 << 5
-
-func NewFastCache() GenericCache {
-	return &FastCacheAdapter{fastcache.New(ChunkSize * ChunkCount)}
-}
-
-func NewOttoCache() GenericCache {
-	return otto.New(ChunkSize, ChunkCount)
-}
 
 func TestSaveAndLoad(t *testing.T) {
 	savePath := path.Join(t.TempDir(), "cache")
@@ -81,7 +58,7 @@ func TestSaveAndLoad(t *testing.T) {
 func TestWriteToBuffer(t *testing.T) {
 	cache := otto.New(ChunkSize, ChunkCount)
 
-	value := [ChunkSize * 3 / 2]byte{0xAA}
+	value := [(ChunkSize * 3) / 2]byte{0xAA}
 
 	cache.Set("example", value[:])
 
@@ -95,6 +72,72 @@ func TestWriteToBuffer(t *testing.T) {
 	if !bytes.Equal(allocatedByTest, value[:]) {
 		t.Fatalf("cached value should not be corrupted %v != %v (expected)", allocatedByOtto, value)
 	}
+}
+
+func TestConcurrent(t *testing.T) {
+	r := rand.NewChaCha8([32]byte{0})
+	ri := rand.New(rand.NewPCG(1, 2))
+
+	otto.Debug = true
+	cache := otto.New(ChunkSize, ChunkCount)
+
+	var wg sync.WaitGroup
+	for key := range 10_000 {
+		wg.Add(1)
+
+		go func(key string) {
+			defer wg.Done()
+
+			size := ri.IntN(ChunkSize*ChunkCount-1) + 1
+			value := make([]byte, size)
+			_, _ = r.Read(value)
+
+			cache.Set(key, value)
+
+			for range 200 {
+				wg.Add(1)
+
+				go func() {
+					defer wg.Done()
+
+					result := cache.Get(key, nil)
+					if bytes.Equal(result, value) {
+						return
+					} else {
+						return
+					}
+				}()
+			}
+
+		}(strconv.Itoa(key))
+	}
+
+	wg.Wait()
+}
+
+type GenericCache interface {
+	Set(key string, buf []byte)
+	Get(key string, buf []byte) []byte
+}
+
+type FastCacheAdapter struct {
+	inner *fastcache.Cache
+}
+
+func (c *FastCacheAdapter) Set(key string, buf []byte) {
+	c.inner.Set([]byte(key), buf)
+}
+
+func (c *FastCacheAdapter) Get(key string, buf []byte) []byte {
+	return c.inner.Get(buf, []byte(key))
+}
+
+func NewFastCache() GenericCache {
+	return &FastCacheAdapter{fastcache.New(ChunkSize * ChunkCount)}
+}
+
+func NewOttoCache() GenericCache {
+	return otto.New(ChunkSize, ChunkCount)
 }
 
 func random10k(tb testing.TB, cache GenericCache) {
@@ -124,6 +167,7 @@ func random10k(tb testing.TB, cache GenericCache) {
 }
 
 func TestCacheRandom10k(t *testing.T) {
+	otto.Debug = true
 	random10k(t, NewOttoCache())
 }
 

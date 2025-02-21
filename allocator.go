@@ -46,17 +46,37 @@ func newAllocator(chunkSize, chunkCount int) *allocator {
 }
 
 func (a *allocator) Clear() {
-	fifo := newQueue[*byte]()
+	fifo := newQueue[*byte](a.chunkCount)
 	for i := 0; i < a.chunkCount; i++ {
-		fifo.Push(&a.arena[i*a.chunkSize : (i+1)*a.chunkSize][0], 1)
+		fifo.MustPush(&a.arena[i*a.chunkSize : (i+1)*a.chunkSize][0], 1)
 	}
 	a.fifo = fifo
 }
 
-func (a *allocator) Get() *byte {
-	return a.fifo.Pop()
+func (a *allocator) Get(chunks []*byte) []*byte {
+	need := cap(chunks)
+	chunks = chunks[:0]
+
+	for i := 0; i < need; i++ {
+		chunk, ok := a.fifo.TryPop()
+		if !ok || chunk == nil {
+			break
+		}
+
+		chunks = append(chunks, chunk)
+	}
+
+	if len(chunks) != need {
+		for _, chunk := range chunks {
+			a.fifo.MustPush(chunk, 1)
+		}
+
+		return chunks[:0]
+	}
+
+	return chunks
 }
 
 func (a *allocator) Put(chunk *byte) {
-	a.fifo.Push(chunk, 1)
+	a.fifo.MustPush(chunk, 1)
 }

@@ -18,26 +18,26 @@ type ghost struct {
 	fifo    *queue[uint64]
 	hashmap *hmap
 
-	size int
+	cap int
 }
 
-func newGhost(size int) *ghost {
+func newGhost(cap int) *ghost {
 	return &ghost{
-		fifo:    newQueue[uint64](),
-		hashmap: newMap(withPresize(size)),
-		size:    size,
+		fifo:    newQueue[uint64](cap),
+		hashmap: newMap(withPresize(cap)),
+		cap:     cap,
 	}
 }
 
 func (g *ghost) Add(hash uint64) {
 	g.hashmap.Store(hash, nil)
 
-	if g.fifo.Size()+1 > g.size {
-		e := g.fifo.Pop()
-		g.hashmap.Delete(e)
+	for !g.fifo.TryPush(hash, 1) {
+		e, ok := g.fifo.TryPop()
+		if ok {
+			g.hashmap.Delete(e)
+		}
 	}
-
-	g.fifo.Push(hash, 1)
 }
 
 func (g *ghost) In(hash uint64) bool {
@@ -47,5 +47,5 @@ func (g *ghost) In(hash uint64) bool {
 
 func (g *ghost) Clear() {
 	g.hashmap.Clear()
-	g.fifo = newQueue[uint64]()
+	g.fifo = newQueue[uint64](g.cap)
 }

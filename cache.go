@@ -21,6 +21,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"sync/atomic"
@@ -55,8 +56,8 @@ func New(chunkSize, chunkCount int) Cache {
 	sSize := chunkCount - mSize
 	return &cache{
 		alloc:      newAllocator(chunkSize+entrySize, chunkCount),
-		m:          newQueue[*entry](),
-		s:          newQueue[*entry](),
+		m:          newQueue[*entry](mSize),
+		s:          newQueue[*entry](sSize),
 		g:          newGhost(mSize),
 		hashmap:    newMap(withPresize(chunkCount)),
 		seed:       maphash.MakeSeed(),
@@ -94,12 +95,20 @@ func (c *cache) set(hash uint64, val []byte) {
 		first *entry
 	)
 
-	for buf := range slices.Chunk(val, c.chunkSize) {
-		chunk := c.alloc.Get()
-		for chunk == nil || c.m.Size()+c.s.Size()+1 > c.chunkCount {
-			c.evict()
-			chunk = c.alloc.Get()
+	chunks := make([]*byte, 0, cost)
+	chunks = c.alloc.Get(chunks)
+	for len(chunks) < cost {
+		c.evict()
+		if c.alloc.fifo.Size() >= cost {
+			chunks = c.alloc.Get(chunks)
+		} else {
+			runtime.Gosched()
 		}
+	}
+
+	var i int
+	for buf := range slices.Chunk(val, c.chunkSize) {
+		chunk := chunks[i]
 
 		e := (*entry)(unsafe.Pointer(chunk))
 		e.hash = hash
@@ -118,12 +127,17 @@ func (c *cache) set(hash uint64, val []byte) {
 		copy(chunkBytes[entrySize:], buf)
 
 		prev = e
+		i += 1
 	}
 
 	if c.g.In(hash) {
-		c.m.Push(first, cost)
+		for !c.m.TryPush(first, cost) {
+			c.evict()
+		}
 	} else {
-		c.s.Push(first, cost)
+		for !c.s.TryPush(first, cost) {
+			c.evict()
+		}
 	}
 
 	c.hashmap.Store(hash, first)
@@ -174,8 +188,8 @@ func (c *cache) get(hash uint64, buf []byte) []byte {
 func (c *cache) Clear() {
 	c.hashmap.Clear()
 	c.alloc.Clear()
-	c.m = newQueue[*entry]()
-	c.s = newQueue[*entry]()
+	c.m = newQueue[*entry](c.mSize)
+	c.s = newQueue[*entry](c.sSize)
 	c.g = newGhost(c.mSize)
 }
 
@@ -256,7 +270,7 @@ func Deserialize(r io.Reader) (Cache, error) {
 }
 
 func (c *cache) evict() {
-	if c.s.Size() > c.sSize {
+	if c.s.Size() >= c.sSize {
 		c.evictS()
 	} else {
 		c.evictM()
@@ -264,60 +278,68 @@ func (c *cache) evict() {
 }
 
 func (c *cache) evictS() {
-	for c.s.Size() > 0 {
-		t := c.s.Pop()
-		if t == nil {
-			os.Exit(1)
-			return
-		} else if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
+	t, ok := c.s.TryPop()
+	for ok && t != nil {
+		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.g.Add(t.hash)
 			c.evictEntry(t)
 			return
 		} else {
-			c.m.Push(t, c.cost(t.size))
-			if c.m.Size() > c.mSize {
+			for !c.m.TryPush(t, c.cost(t.size)) {
 				c.evictM()
 			}
 		}
+
+		t, ok = c.s.TryPop()
 	}
 }
 
 func (c *cache) evictM() {
-	for c.m.Size() > 0 {
-		t := c.m.Pop()
-		if t == nil {
-			return
-		} else if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
+	t, ok := c.m.TryPop()
+	for ok && t != nil {
+		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.evictEntry(t)
 			return
 		} else {
-			// Try to decrease to max(0, freq-1) or break and continue if deleted
 			for {
 				freq := t.frequency.Load()
 
 				if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
-					c.m.Push(t, c.cost(t.size))
+					for !c.m.TryPush(t, c.cost(t.size)) {
+						c.evictM()
+					}
 					break
 				}
 			}
 		}
+
+		t, ok = c.m.TryPop()
 	}
 }
 
 func (c *cache) evictEntry(node *entry) {
+	if Debug {
+		fmt.Printf("evicting key hash %d size = %d cost = %d\n", node.hash, node.size, c.cost(node.size))
+	}
+
 	c.hashmap.Delete(node.hash)
 
+	chunks := c.cost(node.size)
 	chunk := (*byte)(unsafe.Pointer(node))
+
+	var i int
 	for chunk != nil {
 		e := (*entry)(unsafe.Pointer(chunk))
 		next := e.next
 		c.alloc.Put(chunk)
 		chunk = next
+		i += 1
 	}
 
-	if Debug {
-		fmt.Printf("evicting key hash %d size = %d cost = %d\n", node.hash, node.size, c.cost(node.size))
+	if i != chunks {
+		panic(fmt.Sprintf("otto: corruption detected: expected %d chunks, but freed %d chunks", chunks, i))
 	}
+
 }
 
 func (c *cache) cost(size int) int {
@@ -337,10 +359,9 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 	defer func() {
 		if err := recover(); err != nil {
 			panic(fmt.Sprintf("corruption panic: %v: metadata: size = %d, chunksToScan = %d, len(buf) = %d, entry.access = %d, entry.frequency = %d, entry.size = %d\n%s", err, size, chunksToScan, len(buf), e.access.Load(), e.frequency.Load(), e.size, string(debug.Stack())))
-		}	
+		}
 	}()
 
-	
 	chunk := (*byte)(unsafe.Pointer(e))
 	for i := 0; i < chunksToScan && chunk != nil; i++ {
 		e := (*entry)(unsafe.Pointer(chunk))
