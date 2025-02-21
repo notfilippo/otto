@@ -286,7 +286,7 @@ func (c *cache) evictM() {
 		t := c.m.Pop()
 		if t == nil {
 			return
-		} else if t.frequency.CompareAndSwap(0, math.MinInt32) {
+		} else if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.evictEntry(t)
 			return
 		} else {
