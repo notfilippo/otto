@@ -21,6 +21,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"runtime/debug"
 	"slices"
 	"sync/atomic"
 	"unsafe"
@@ -333,6 +334,13 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 
 	chunk := (*byte)(unsafe.Pointer(e))
 	var i int
+
+	defer func() {
+		if err := recover(); err != nil {
+			panic(fmt.Sprintf("corruption panic: %v: metadata: size = %d, i = %d, len(buf) = %d, entry.access = %d, entry.frequency = %d, entry.size = %d\n%s", err, size, i, len(buf), e.access.Load(), e.frequency.Load(), e.size, string(debug.Stack())))
+		}	
+	}()
+	
 	for chunk != nil {
 		e := (*entry)(unsafe.Pointer(chunk))
 		source := unsafe.Slice(chunk, c.chunkSize+entrySize)
