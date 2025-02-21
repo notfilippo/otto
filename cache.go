@@ -332,16 +332,17 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 		buf = buf[:size]
 	}
 
-	chunk := (*byte)(unsafe.Pointer(e))
-	var i int
+	chunksToScan := c.cost(size)
 
 	defer func() {
 		if err := recover(); err != nil {
-			panic(fmt.Sprintf("corruption panic: %v: metadata: size = %d, i = %d, len(buf) = %d, entry.access = %d, entry.frequency = %d, entry.size = %d\n%s", err, size, i, len(buf), e.access.Load(), e.frequency.Load(), e.size, string(debug.Stack())))
+			panic(fmt.Sprintf("corruption panic: %v: metadata: size = %d, chunksToScan = %d, len(buf) = %d, entry.access = %d, entry.frequency = %d, entry.size = %d\n%s", err, size, chunksToScan, len(buf), e.access.Load(), e.frequency.Load(), e.size, string(debug.Stack())))
 		}	
 	}()
+
 	
-	for chunk != nil {
+	chunk := (*byte)(unsafe.Pointer(e))
+	for i := range chunksToScan {
 		e := (*entry)(unsafe.Pointer(chunk))
 		source := unsafe.Slice(chunk, c.chunkSize+entrySize)
 
