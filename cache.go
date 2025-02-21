@@ -130,12 +130,16 @@ func (c *cache) set(hash uint64, val []byte) {
 
 func (c *cache) Get(key string, buf []byte) []byte {
 	hash := maphash.String(c.seed, key)
-	e, ok := c.hashmap.Load(hash)
 
 	if Debug {
-		fmt.Printf("getting key %s string (hash %d) ok = %t\n", key, hash, ok)
+		fmt.Printf("getting key %s string (hash %d)\n", key, hash)
 	}
 
+	return c.get(hash, buf)
+}
+
+func (c *cache) get(hash uint64, buf []byte) []byte {
+	e, _ := c.hashmap.Load(hash)
 	if e == nil {
 		return nil
 	}
@@ -201,12 +205,8 @@ func (c *cache) Serialize(w io.Writer) error {
 
 	hashmap := toPlainMap(c.hashmap)
 	plain := make(map[uint64][]byte)
-	for k, v := range hashmap {
-		if v != nil {
-			plain[k] = c.read(v, nil)
-		} else {
-			plain[k] = nil
-		}
+	for k := range hashmap {
+		plain[k] = c.get(k, nil)
 	}
 
 	return e.Encode(plain)
@@ -324,10 +324,11 @@ func (c *cache) cost(size int) int {
 }
 
 func (c *cache) read(e *entry, buf []byte) []byte {
-	if cap(buf) < e.size {
-		buf = make([]byte, e.size)
+	size := e.size
+	if cap(buf) < size {
+		buf = make([]byte, size)
 	} else {
-		buf = buf[:e.size]
+		buf = buf[:size]
 	}
 
 	chunk := (*byte)(unsafe.Pointer(e))
@@ -336,7 +337,7 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 		e := (*entry)(unsafe.Pointer(chunk))
 		source := unsafe.Slice(chunk, c.chunkSize+entrySize)
 
-		end := min((i+1)*c.chunkSize, e.size)
+		end := min((i+1)*c.chunkSize, size)
 		copy(buf[i*c.chunkSize:end], source[entrySize:])
 
 		i += 1
