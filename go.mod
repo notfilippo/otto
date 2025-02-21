@@ -14,7 +14,7 @@
 
 module github.com/notfilippo/otto
 
-go 1.24.0
+go 1.23.6
 
 require (
 	github.com/VictoriaMetrics/fastcache v1.12.2
