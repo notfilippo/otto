@@ -16,12 +16,5 @@ module github.com/notfilippo/otto
 
 go 1.23.6
 
-require (
-	github.com/VictoriaMetrics/fastcache v1.12.2
-	golang.org/x/sys v0.30.0
-)
+require golang.org/x/sys v0.30.0
 
-require (
-	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
-)

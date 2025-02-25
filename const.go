@@ -14,38 +14,10 @@
 
 package otto
 
-type ghost struct {
-	fifo    *queue[uint64]
-	hashmap *hmap
-
-	cap int
-}
-
-func newGhost(cap int) *ghost {
-	return &ghost{
-		fifo:    newQueue[uint64](cap),
-		hashmap: newMap(withPresize(cap)),
-		cap:     cap,
-	}
-}
-
-func (g *ghost) Add(hash uint64) {
-	g.hashmap.Store(hash, nil)
-
-	for !g.fifo.TryEnqueue(hash) {
-		e, ok := g.fifo.TryDequeue()
-		if ok {
-			g.hashmap.Delete(e)
-		}
-	}
-}
-
-func (g *ghost) In(hash uint64) bool {
-	_, ok := g.hashmap.Load(hash)
-	return ok
-}
-
-func (g *ghost) Clear() {
-	g.hashmap.Clear()
-	g.fifo = newQueue[uint64](g.cap)
-}
+const (
+	// cacheLineSize is used in paddings to prevent false sharing;
+	// 64B are used instead of 128B as a compromise between
+	// memory footprint and performance; 128B usage may give ~30%
+	// improvement on NUMA machines.
+	cacheLineSize = 64
+)

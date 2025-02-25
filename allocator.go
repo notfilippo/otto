@@ -22,61 +22,50 @@ import (
 
 type allocator struct {
 	arena []byte
-	fifo  *queue[*byte]
 
-	chunkSize  int
-	chunkCount int
+	slotSize  int
+	slotCount int
+
+	fifo *queue[*byte]
 }
 
-func newAllocator(chunkSize, chunkCount int) *allocator {
-	arenaSize := chunkSize * chunkCount
+func newAllocator(slotSize, slotCount int) *allocator {
+	arenaSize := slotSize * slotCount
 	arena, err := unix.Mmap(-1, 0, arenaSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
 	if err != nil {
-		panic(fmt.Errorf("cannot allocate %d (chunkSize) * %d (chunkCount) = %d bytes via mmap: %s", chunkSize, chunkCount, arenaSize, err))
+		panic(fmt.Errorf("cannot allocate %d (slotSize) * %d (slotCount) = %d bytes via mmap: %s", slotSize, slotCount, arenaSize, err))
 	}
 
 	a := &allocator{
-		arena:      arena,
-		chunkSize:  chunkSize,
-		chunkCount: chunkCount,
+		arena:     arena,
+		slotSize:  slotSize,
+		slotCount: slotCount,
+		fifo:      newQueue[*byte](slotCount),
 	}
+
 	a.Clear()
 
 	return a
 }
 
-func (a *allocator) Clear() {
-	fifo := newQueue[*byte](a.chunkCount)
-	for i := 0; i < a.chunkCount; i++ {
-		fifo.MustPush(&a.arena[i*a.chunkSize : (i+1)*a.chunkSize][0], 1)
-	}
-	a.fifo = fifo
+func (a *allocator) Alloc(slots int, yield func(*byte)) bool {
+	return a.fifo.TryDequeueBatch(slots, yield)
 }
 
-func (a *allocator) Get(chunks []*byte) []*byte {
-	need := cap(chunks)
-	chunks = chunks[:0]
+func (a *allocator) Free(slot *byte) bool {
+	return a.fifo.TryEnqueue(slot)
+}
 
-	for i := 0; i < need; i++ {
-		chunk, ok := a.fifo.TryPop()
-		if !ok || chunk == nil {
+func (a *allocator) Clear() {
+	for {
+		if _, ok := a.fifo.TryDequeue(); !ok {
 			break
 		}
-
-		chunks = append(chunks, chunk)
 	}
 
-	if len(chunks) != need {
-		for _, chunk := range chunks {
-			a.fifo.MustPush(chunk, 1)
+	for i := range a.slotCount {
+		if !a.fifo.TryEnqueue(&a.arena[i*a.slotSize : (i+1)*a.slotSize][0]) {
+			panic("otto: allocator: failed to clear")
 		}
-
-		return chunks[:0]
 	}
-
-	return chunks
-}
-
-func (a *allocator) Put(chunk *byte) {
-	a.fifo.MustPush(chunk, 1)
 }

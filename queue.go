@@ -11,118 +11,141 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
- 
+
 // Modified version of https://github.com/puzpuzpuz/xsync/blob/main/mpmcqueue.go
 // Licensed under Apache-2.0 Copyright 2025 Andrei Pechkurov
 
 package otto
 
 import (
-	"runtime"
 	"sync/atomic"
 	"unsafe"
 )
 
+// A queue is a bounded multi-producer multi-consumer concurrent
+// queue.
+//
+// queue instances must be created with newQueue function.
+// A queue must not be copied after first use.
+//
 // Based on the data structure from the following C++ library:
 // https://github.com/rigtorp/MPMCQueue
-
-type queue[I any] struct {
+type queue[T any] struct {
 	cap  uint64
-	size atomic.Int64
-
 	head uint64
+	//lint:ignore U1000 prevents false sharing
 	hpad [cacheLineSize - 8]byte
 	tail uint64
-	tpad [cacheLineSize - 8]byte
-
-	slots []slotOfPadded[I]
+	//lint:ignore U1000 prevents false sharing
+	tpad  [cacheLineSize - 8]byte
+	slots []slotPadded[T]
 }
 
-type slotOfPadded[I any] struct {
-	slotOf[I]
-	// Unfortunately, proper padding like the below one:
-	//
-	// pad [cacheLineSize - (unsafe.Sizeof(slotOf[I]{}) % cacheLineSize)]byte
-	//
-	// won't compile, so here we add a best-effort padding for items up to
-	// 56 bytes size.
-	//
-	// For this specific use case we can consider item to be a pointer.
-	pad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})*2 - unsafe.Sizeof(uintptr(0))]byte
+type slotPadded[T any] struct {
+	slot[T]
+	//lint:ignore U1000 prevents false sharing
+	pad [cacheLineSize - unsafe.Sizeof(slot[uintptr]{})]byte
 }
 
-type slotOf[I any] struct {
-	// atomic.Uint64 is used here to get proper 8 byte alignment on
-	// 32-bit archs.
-	turn atomic.Uint64
-	size atomic.Int64
-	item I
+type slot[T any] struct {
+	turn uint64
+	item T
 }
 
-func newQueue[I any](capacity int) *queue[I] {
+// newQueue creates a new Queue instance with the given
+// capacity.
+func newQueue[T any](capacity int) *queue[T] {
 	if capacity < 1 {
 		panic("capacity must be positive number")
 	}
-	return &queue[I]{
+	return &queue[T]{
 		cap:   uint64(capacity),
-		slots: make([]slotOfPadded[I], capacity),
+		slots: make([]slotPadded[T], capacity),
 	}
 }
 
-// TryPush inserts the given item into the queue. Does not block
+// TryEnqueue inserts the given item into the queue. Does not block
 // and returns immediately. The result indicates that the queue isn't
 // full and the item was inserted.
-func (q *queue[I]) TryPush(item I, size int) bool {
+func (q *queue[T]) TryEnqueue(item T) bool {
 	head := atomic.LoadUint64(&q.head)
 	slot := &q.slots[q.idx(head)]
 	turn := q.turn(head) * 2
-	if slot.turn.Load() == turn {
+	if atomic.LoadUint64(&slot.turn) == turn {
 		if atomic.CompareAndSwapUint64(&q.head, head, head+1) {
 			slot.item = item
-			slot.turn.Store(turn + 1)
-			slot.size.Store(int64(size))
-			q.size.Add(int64(size))
+			atomic.StoreUint64(&slot.turn, turn+1)
 			return true
 		}
 	}
 	return false
 }
 
-func (q *queue[I]) MustPush(item I, size int) {
-	for !q.TryPush(item, size) {
-		runtime.Gosched()
-	}
-}
-
-// TryPop retrieves and removes the item from the head of the
+// TryDequeue retrieves and removes the item from the head of the
 // queue. Does not block and returns immediately. The ok result
 // indicates that the queue isn't empty and an item was retrieved.
-func (q *queue[I]) TryPop() (item I, ok bool) {
+func (q *queue[T]) TryDequeue() (item T, ok bool) {
 	tail := atomic.LoadUint64(&q.tail)
 	slot := &q.slots[q.idx(tail)]
 	turn := q.turn(tail)*2 + 1
-	if slot.turn.Load() == turn {
+	if atomic.LoadUint64(&slot.turn) == turn {
 		if atomic.CompareAndSwapUint64(&q.tail, tail, tail+1) {
-			var zeroI I
 			item = slot.item
 			ok = true
-			slot.item = zeroI
-			q.size.Add(-slot.size.Swap(0))
-			slot.turn.Store(turn + 1)
+			var zero T
+			slot.item = zero
+			atomic.StoreUint64(&slot.turn, turn+1)
 			return
 		}
 	}
 	return
 }
 
-func (q *queue[I]) Size() int {
-	return int(q.size.Load())
+// TryDequeueBatch attempts to atomically dequeue exactly n items from the queue.
+// Returns the dequeued items and a boolean indicating success. If the queue
+// doesn't have at least n items, no items are dequeued and the function returns false.
+func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
+	if n <= 0 {
+		return false
+	}
+
+	// Load the tail index
+	tail := atomic.LoadUint64(&q.tail)
+
+	// Check if all n slots are ready for dequeuing
+	for i := range n {
+		idx := q.idx(tail + uint64(i))
+		slot := &q.slots[idx]
+		turn := q.turn(tail+uint64(i))*2 + 1
+		if atomic.LoadUint64(&slot.turn) != turn {
+			return false // Not all slots are ready
+		}
+	}
+
+	// Try to atomically increment the tail index by n
+	if !atomic.CompareAndSwapUint64(&q.tail, tail, tail+uint64(n)) {
+		return false // Another consumer modified tail
+	}
+
+	// Dequeue all n items
+	for i := range n {
+		idx := q.idx(tail + uint64(i))
+		slot := &q.slots[idx]
+		turn := q.turn(tail+uint64(i))*2 + 1
+
+		yield(slot.item)
+		var zero T
+		slot.item = zero
+		atomic.StoreUint64(&slot.turn, turn+1)
+	}
+
+	return true
 }
 
-func (q *queue[I]) idx(i uint64) uint64 {
+func (q *queue[T]) idx(i uint64) uint64 {
 	return i % q.cap
 }
 
-func (q *queue[I]) turn(i uint64) uint64 {
+func (q *queue[T]) turn(i uint64) uint64 {
 	return i / q.cap
 }

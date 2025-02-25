@@ -22,8 +22,6 @@ import (
 	"math"
 	"os"
 	"runtime"
-	"runtime/debug"
-	"slices"
 	"sync/atomic"
 	"unsafe"
 )
@@ -36,6 +34,7 @@ type Cache interface {
 	Set(key string, val []byte)
 	Get(key string, buf []byte) []byte
 	Clear()
+
 	SaveToFile(path string) error
 	Serialize(w io.Writer) error
 }
@@ -47,24 +46,25 @@ type cache struct {
 	hashmap *hmap
 	seed    maphash.Seed
 
-	chunkSize, chunkCount int
-	mSize, sSize          int
+	slotSize, slotCount int
+	mCap, sCap          int
+	mSize, sSize        atomic.Int64
 }
 
-func New(chunkSize, chunkCount int) Cache {
-	mSize := (chunkCount * 90) / 100
-	sSize := chunkCount - mSize
+func New(slotSize, slotCount int) Cache {
+	mCap := (slotCount * 90) / 100
+	sCap := slotCount - mCap
 	return &cache{
-		alloc:      newAllocator(chunkSize+entrySize, chunkCount),
-		m:          newQueue[*entry](mSize),
-		s:          newQueue[*entry](sSize),
-		g:          newGhost(mSize),
-		hashmap:    newMap(withPresize(chunkCount)),
-		seed:       maphash.MakeSeed(),
-		chunkSize:  chunkSize,
-		chunkCount: chunkCount,
-		mSize:      mSize,
-		sSize:      sSize,
+		alloc:     newAllocator(slotSize+entrySize, slotCount),
+		m:         newQueue[*entry](mCap),
+		s:         newQueue[*entry](sCap),
+		g:         newGhost(mCap),
+		hashmap:   newMap(withPresize(slotCount)),
+		seed:      maphash.MakeSeed(),
+		slotSize:  slotSize,
+		slotCount: slotCount,
+		mCap:      mCap,
+		sCap:      sCap,
 	}
 }
 
@@ -79,68 +79,68 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
+	if val == nil {
+		return	
+	}
+	
 	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
 		// Already in the cache
 		return
 	}
 
-	cost := c.cost(len(val))
+	if len(val) == 0 {
+		return
+	}
 
-	if cost > c.mSize+c.sSize {
-		panic(fmt.Sprintf("otto: no more memory to store key %d size = %d cost = %d", hash, len(val), cost))
+	size := len(val)
+	cost := c.cost(size)
+
+	if cost > c.slotCount {
+		panic(fmt.Sprintf("otto: no more memory to store key %d size = %d cost = %d", hash, size, cost))
 	}
 
 	var (
 		prev  *entry
 		first *entry
+		i     int
 	)
 
-	chunks := make([]*byte, 0, cost)
-	chunks = c.alloc.Get(chunks)
-	for len(chunks) < cost {
-		c.evict()
-		if c.alloc.fifo.Size() >= cost {
-			chunks = c.alloc.Get(chunks)
+	for !c.alloc.Alloc(cost, func(b *byte) {
+		e := (*entry)(unsafe.Pointer(b))
+		if prev != nil {
+			prev.next = b
 		} else {
-			runtime.Gosched()
+			first = e
 		}
-	}
 
-	var i int
-	for buf := range slices.Chunk(val, c.chunkSize) {
-		chunk := chunks[i]
-
-		e := (*entry)(unsafe.Pointer(chunk))
 		e.hash = hash
-		e.size = len(val)
+		e.next = nil
+		e.size = size
 		e.frequency.Store(0)
 		e.access.Store(0)
-		e.next = nil
 
-		if prev == nil {
-			first = e
-		} else {
-			prev.next = chunk
-		}
-
-		chunkBytes := unsafe.Slice(chunk, c.chunkSize+entrySize)
-		copy(chunkBytes[entrySize:], buf)
+		buf := unsafe.Slice(b, entrySize+c.slotSize)
+		copy(buf[entrySize:], val[i*c.slotSize:])
 
 		prev = e
 		i += 1
-	}
-
-	if c.g.In(hash) {
-		for !c.m.TryPush(first, cost) {
-			c.evict()
-		}
-	} else {
-		for !c.s.TryPush(first, cost) {
-			c.evict()
-		}
+	}) {
+		c.evict()
 	}
 
 	c.hashmap.Store(hash, first)
+
+	if c.g.In(hash) {
+		for !c.m.TryEnqueue(first) {
+			c.evictM()
+		}
+		c.mSize.Add(int64(cost))
+	} else {
+		for !c.s.TryEnqueue(first) {
+			c.evictS()
+		}
+		c.sSize.Add(int64(cost))
+	}
 }
 
 func (c *cache) Get(key string, buf []byte) []byte {
@@ -154,8 +154,8 @@ func (c *cache) Get(key string, buf []byte) []byte {
 }
 
 func (c *cache) get(hash uint64, buf []byte) []byte {
-	e, _ := c.hashmap.Load(hash)
-	if e == nil {
+	e, ok := c.hashmap.Load(hash)
+	if !ok || e == nil {
 		return nil
 	}
 
@@ -185,12 +185,130 @@ func (c *cache) get(hash uint64, buf []byte) []byte {
 	return buf
 }
 
+func (c *cache) evict() {
+	if c.sSize.Load() >= int64(c.sCap) {
+		c.evictS()
+	} else {
+		c.evictM()
+	}
+}
+
+func (c *cache) evictS() {
+	t, ok := c.s.TryDequeue()
+	for ok && t != nil {
+		c.sSize.Add(-int64(c.cost(t.size)))
+
+		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
+			c.g.Add(t.hash)
+			c.evictEntry(t)
+			return
+		} else {
+			for !c.m.TryEnqueue(t) {
+				c.evictM()
+			}
+			c.mSize.Add(int64(c.cost(t.size)))
+		}
+
+		t, ok = c.s.TryDequeue()
+	}
+}
+
+func (c *cache) evictM() {
+	t, ok := c.m.TryDequeue()
+	for ok && t != nil {
+		c.mSize.Add(-int64(c.cost(t.size)))
+
+		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
+			c.evictEntry(t)
+			return
+		} else {
+			for {
+				freq := t.frequency.Load()
+
+				if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
+					for !c.m.TryEnqueue(t) {
+						c.evictM()
+					}
+
+					c.mSize.Add(int64(c.cost(t.size)))
+					break
+				}
+			}
+		}
+
+		t, ok = c.m.TryDequeue()
+	}
+}
+
+func (c *cache) evictEntry(e *entry) {
+	if Debug {
+		fmt.Printf("evicting key hash %d size = %d cost = %d\n", e.hash, e.size, c.cost(e.size))
+	}
+
+	c.hashmap.Delete(e.hash)
+
+	if e.size < 1 {
+		panic("otto: invariant violated: size")
+	}
+
+	chunk := (*byte)(unsafe.Pointer(e))
+	for range c.cost(e.size) {
+		e := (*entry)(unsafe.Pointer(chunk))
+		next := e.next
+		for !c.alloc.Free(chunk) {
+			runtime.Gosched()
+		}
+		chunk = next
+	}
+}
+
+func (c *cache) cost(size int) int {
+	return (size + c.slotSize - 1) / c.slotSize
+}
+
+func (c *cache) read(e *entry, buf []byte) []byte {
+	size := e.size
+	if cap(buf) < size {
+		buf = make([]byte, size)
+	} else {
+		buf = buf[:size]
+	}
+
+	slots := c.cost(size)
+
+	slot := (*byte)(unsafe.Pointer(e))
+	for i := range slots {
+		e := (*entry)(unsafe.Pointer(slot))
+		source := unsafe.Slice(slot, c.slotSize+entrySize)
+
+		end := min((i+1)*c.slotSize, size)
+		copy(buf[i*c.slotSize:end], source[entrySize:])
+
+		slot = e.next
+	}
+
+	return buf
+}
+
+type entry struct {
+	hash uint64
+	next *byte
+	size int
+
+	frequency atomic.Int32
+	access    atomic.Int32
+}
+
+var entrySize = int(unsafe.Sizeof(entry{}))
+
 func (c *cache) Clear() {
-	c.hashmap.Clear()
+	c.hashmap = newMap(withPresize(c.slotCount))
 	c.alloc.Clear()
-	c.m = newQueue[*entry](c.mSize)
-	c.s = newQueue[*entry](c.sSize)
-	c.g = newGhost(c.mSize)
+	c.m = newQueue[*entry](c.mCap)
+	c.s = newQueue[*entry](c.sCap)
+	c.g = newGhost(c.mCap)
+	c.mSize.Store(0)
+	c.sSize.Store(0)
 }
 
 func (c *cache) SaveToFile(path string) error {
@@ -199,17 +317,21 @@ func (c *cache) SaveToFile(path string) error {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 
-	return c.Serialize(file)
+	if err := c.Serialize(file); err != nil {
+		return fmt.Errorf("failed to serialize to file: %w", err)
+	}
+
+	return file.Close()
 }
 
 func (c *cache) Serialize(w io.Writer) error {
 	e := gob.NewEncoder(w)
 
-	if err := e.Encode(c.chunkSize); err != nil {
+	if err := e.Encode(c.slotSize); err != nil {
 		return err
 	}
 
-	if err := e.Encode(c.chunkCount); err != nil {
+	if err := e.Encode(c.slotCount); err != nil {
 		return err
 	}
 
@@ -218,11 +340,11 @@ func (c *cache) Serialize(w io.Writer) error {
 		return err
 	}
 
-	hashmap := toPlainMap(c.hashmap)
 	plain := make(map[uint64][]byte)
-	for k := range hashmap {
+	c.hashmap.Range(func(k uint64, v *entry) bool {
 		plain[k] = c.get(k, nil)
-	}
+		return true
+	})
 
 	return e.Encode(plain)
 }
@@ -233,7 +355,12 @@ func LoadFromFile(path string) (Cache, error) {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
-	return Deserialize(file)
+	cache, err := Deserialize(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize to file: %w", err)
+	}
+
+	return cache, file.Close()
 }
 
 func Deserialize(r io.Reader) (Cache, error) {
@@ -268,122 +395,3 @@ func Deserialize(r io.Reader) (Cache, error) {
 
 	return c, nil
 }
-
-func (c *cache) evict() {
-	if c.s.Size() >= c.sSize {
-		c.evictS()
-	} else {
-		c.evictM()
-	}
-}
-
-func (c *cache) evictS() {
-	t, ok := c.s.TryPop()
-	for ok && t != nil {
-		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
-			c.g.Add(t.hash)
-			c.evictEntry(t)
-			return
-		} else {
-			for !c.m.TryPush(t, c.cost(t.size)) {
-				c.evictM()
-			}
-		}
-
-		t, ok = c.s.TryPop()
-	}
-}
-
-func (c *cache) evictM() {
-	t, ok := c.m.TryPop()
-	for ok && t != nil {
-		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
-			c.evictEntry(t)
-			return
-		} else {
-			for {
-				freq := t.frequency.Load()
-
-				if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
-					for !c.m.TryPush(t, c.cost(t.size)) {
-						c.evictM()
-					}
-					break
-				}
-			}
-		}
-
-		t, ok = c.m.TryPop()
-	}
-}
-
-func (c *cache) evictEntry(node *entry) {
-	if Debug {
-		fmt.Printf("evicting key hash %d size = %d cost = %d\n", node.hash, node.size, c.cost(node.size))
-	}
-
-	c.hashmap.Delete(node.hash)
-
-	chunks := c.cost(node.size)
-	chunk := (*byte)(unsafe.Pointer(node))
-
-	var i int
-	for chunk != nil {
-		e := (*entry)(unsafe.Pointer(chunk))
-		next := e.next
-		c.alloc.Put(chunk)
-		chunk = next
-		i += 1
-	}
-
-	if i != chunks {
-		panic(fmt.Sprintf("otto: corruption detected: expected %d chunks, but freed %d chunks", chunks, i))
-	}
-
-}
-
-func (c *cache) cost(size int) int {
-	return (size + c.chunkSize - 1) / c.chunkSize
-}
-
-func (c *cache) read(e *entry, buf []byte) []byte {
-	size := e.size
-	if cap(buf) < size {
-		buf = make([]byte, size)
-	} else {
-		buf = buf[:size]
-	}
-
-	chunksToScan := c.cost(size)
-
-	defer func() {
-		if err := recover(); err != nil {
-			panic(fmt.Sprintf("corruption panic: %v: metadata: size = %d, chunksToScan = %d, len(buf) = %d, entry.access = %d, entry.frequency = %d, entry.size = %d\n%s", err, size, chunksToScan, len(buf), e.access.Load(), e.frequency.Load(), e.size, string(debug.Stack())))
-		}
-	}()
-
-	chunk := (*byte)(unsafe.Pointer(e))
-	for i := 0; i < chunksToScan && chunk != nil; i++ {
-		e := (*entry)(unsafe.Pointer(chunk))
-		source := unsafe.Slice(chunk, c.chunkSize+entrySize)
-
-		end := min((i+1)*c.chunkSize, size)
-		copy(buf[i*c.chunkSize:end], source[entrySize:])
-
-		i += 1
-		chunk = e.next
-	}
-
-	return buf
-}
-
-type entry struct {
-	hash uint64
-	next *byte
-	size int
-
-	frequency atomic.Int32
-	access    atomic.Int32
-}
-
-var entrySize = int(unsafe.Sizeof(entry{}))

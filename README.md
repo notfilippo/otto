@@ -1,6 +1,6 @@
 # Otto
 
-> An S3-FIFO-based cache for big values in Go.
+An S3-FIFO-based cache for big values in Go.
 
 ```go
 package main

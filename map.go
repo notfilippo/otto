@@ -54,11 +54,6 @@ const (
 	minMapCounterLen = 8
 	// maximum counter stripes to use; stands for around 4KB of memory
 	maxMapCounterLen = 32
-	// cacheLineSize is used in paddings to prevent false sharing;
-	// 64B are used instead of 128B as a compromise between
-	// memory footprint and performance; 128B usage may give ~30%
-	// improvement on NUMA machines.
-	cacheLineSize = 64
 )
 
 var (
