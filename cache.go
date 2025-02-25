@@ -35,20 +35,35 @@ type Cache interface {
 	Get(key string, buf []byte) []byte
 	Clear()
 
+	Metrics() Metrics
+
 	SaveToFile(path string) error
 	Serialize(w io.Writer) error
 }
 
+type Metrics struct {
+	Entries uint64
+
+	WindowEntrySizeAvg    float64
+	WindowEntryInsertions uint64
+	WindowEntryEvictions  uint64
+}
+
 type cache struct {
 	alloc   *allocator
-	m, s    *queue[*entry]
+	m, s    *entryQueue
 	g       *ghost
 	hashmap *hmap
 	seed    maphash.Seed
 
 	slotSize, slotCount int
-	mCap, sCap          int
-	mSize, sSize        atomic.Int64
+
+	entries atomic.Uint64
+
+	windowEntryCount atomic.Uint64
+	windowEntrySize  atomic.Uint64
+	windowInsertions atomic.Uint64
+	windowEvictions  atomic.Uint64
 }
 
 func New(slotSize, slotCount int) Cache {
@@ -56,15 +71,13 @@ func New(slotSize, slotCount int) Cache {
 	sCap := slotCount - mCap
 	return &cache{
 		alloc:     newAllocator(slotSize+entrySize, slotCount),
-		m:         newQueue[*entry](mCap),
-		s:         newQueue[*entry](sCap),
+		m:         newEntryQueue(mCap),
+		s:         newEntryQueue(sCap),
 		g:         newGhost(mCap),
 		hashmap:   newMap(withPresize(slotCount)),
 		seed:      maphash.MakeSeed(),
 		slotSize:  slotSize,
 		slotCount: slotCount,
-		mCap:      mCap,
-		sCap:      sCap,
 	}
 }
 
@@ -79,16 +92,12 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	if val == nil {
-		return	
-	}
-	
-	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
-		// Already in the cache
+	if val == nil || len(val) == 0 {
 		return
 	}
 
-	if len(val) == 0 {
+	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
+		// Already in the cache and we don't support updates
 		return
 	}
 
@@ -129,17 +138,20 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 
 	c.hashmap.Store(hash, first)
+	c.entries.Add(1)
+
+	c.windowInsertions.Add(1)
+	c.windowEntryCount.Add(1)
+	c.windowEntrySize.Add(uint64(size))
 
 	if c.g.In(hash) {
-		for !c.m.TryEnqueue(first) {
+		for !c.m.Push(first) {
 			c.evictM()
 		}
-		c.mSize.Add(int64(cost))
 	} else {
-		for !c.s.TryEnqueue(first) {
+		for !c.s.Push(first) {
 			c.evictS()
 		}
-		c.sSize.Add(int64(cost))
 	}
 }
 
@@ -186,7 +198,7 @@ func (c *cache) get(hash uint64, buf []byte) []byte {
 }
 
 func (c *cache) evict() {
-	if c.sSize.Load() >= int64(c.sCap) {
+	if c.s.IsFull() {
 		c.evictS()
 	} else {
 		c.evictM()
@@ -194,30 +206,28 @@ func (c *cache) evict() {
 }
 
 func (c *cache) evictS() {
-	t, ok := c.s.TryDequeue()
+	t, ok := c.s.Pop()
 	for ok && t != nil {
-		c.sSize.Add(-int64(c.cost(t.size)))
-
 		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.g.Add(t.hash)
 			c.evictEntry(t)
 			return
 		} else {
-			for !c.m.TryEnqueue(t) {
+			for !c.m.Push(t) {
 				c.evictM()
 			}
-			c.mSize.Add(int64(c.cost(t.size)))
+			for c.m.IsFull() {
+				c.evictM()
+			}
 		}
 
-		t, ok = c.s.TryDequeue()
+		t, ok = c.s.Pop()
 	}
 }
 
 func (c *cache) evictM() {
-	t, ok := c.m.TryDequeue()
+	t, ok := c.m.Pop()
 	for ok && t != nil {
-		c.mSize.Add(-int64(c.cost(t.size)))
-
 		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.evictEntry(t)
 			return
@@ -226,17 +236,16 @@ func (c *cache) evictM() {
 				freq := t.frequency.Load()
 
 				if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
-					for !c.m.TryEnqueue(t) {
+					for !c.m.Push(t) {
 						c.evictM()
 					}
 
-					c.mSize.Add(int64(c.cost(t.size)))
 					break
 				}
 			}
 		}
 
-		t, ok = c.m.TryDequeue()
+		t, ok = c.m.Pop()
 	}
 }
 
@@ -245,10 +254,15 @@ func (c *cache) evictEntry(e *entry) {
 		fmt.Printf("evicting key hash %d size = %d cost = %d\n", e.hash, e.size, c.cost(e.size))
 	}
 
-	c.hashmap.Delete(e.hash)
+	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || prev != e {
+		panic("otto: invariant violated: entry already deleted")
+	}
+
+	c.entries.Add(^uint64(0))
+	c.windowEvictions.Add(1)
 
 	if e.size < 1 {
-		panic("otto: invariant violated: size")
+		panic("otto: invariant violated: entry with size zero")
 	}
 
 	chunk := (*byte)(unsafe.Pointer(e))
@@ -290,25 +304,23 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 	return buf
 }
 
-type entry struct {
-	hash uint64
-	next *byte
-	size int
-
-	frequency atomic.Int32
-	access    atomic.Int32
-}
-
-var entrySize = int(unsafe.Sizeof(entry{}))
-
 func (c *cache) Clear() {
+	mCap := (c.slotCount * 90) / 100
+	sCap := c.slotCount - mCap
 	c.hashmap = newMap(withPresize(c.slotCount))
 	c.alloc.Clear()
-	c.m = newQueue[*entry](c.mCap)
-	c.s = newQueue[*entry](c.sCap)
-	c.g = newGhost(c.mCap)
-	c.mSize.Store(0)
-	c.sSize.Store(0)
+	c.m = newEntryQueue(mCap)
+	c.s = newEntryQueue(sCap)
+	c.g = newGhost(mCap)
+}
+
+func (c *cache) Metrics() Metrics {
+	return Metrics{
+		Entries:               c.entries.Load(),
+		WindowEntrySizeAvg:    float64(c.windowEntrySize.Swap(0)) / float64(c.windowEntryCount.Swap(0)),
+		WindowEntryInsertions: c.windowInsertions.Swap(0),
+		WindowEntryEvictions:  c.windowEvictions.Swap(0),
+	}
 }
 
 func (c *cache) SaveToFile(path string) error {

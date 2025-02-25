@@ -275,7 +275,7 @@ func TestCacheSerialization(t *testing.T) {
 		"key1": []byte("value1"),
 		"key2": []byte("value2"),
 		"key3": []byte("A longer value that spans multiple slots potentially"),
-		"key4": []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, // Binary data
+		"key4": {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, // Binary data
 	}
 
 	// Store all test data
