@@ -69,3 +69,10 @@ func (a *allocator) Clear() {
 		}
 	}
 }
+
+func (a *allocator) Close() {
+	err := unix.Munmap(a.arena)
+	if err != nil {
+		panic(fmt.Errorf("cannot unmap allocator's memory: %w", err))
+	}
+}

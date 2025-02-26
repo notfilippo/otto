@@ -34,19 +34,12 @@ type Cache interface {
 	Set(key string, val []byte)
 	Get(key string, buf []byte) []byte
 	Clear()
+	Close()
 
-	Metrics() Metrics
+	Entries() uint64
 
 	SaveToFile(path string) error
 	Serialize(w io.Writer) error
-}
-
-type Metrics struct {
-	Entries uint64
-
-	WindowEntrySizeAvg    float64
-	WindowEntryInsertions uint64
-	WindowEntryEvictions  uint64
 }
 
 type cache struct {
@@ -314,9 +307,12 @@ func (c *cache) Clear() {
 	c.g = newGhost(mCap)
 }
 
+func (c *cache) Close() {
+	c.alloc.Close()
+}
+
 func (c *cache) Metrics() Metrics {
 	return Metrics{
-		Entries:               c.entries.Load(),
 		WindowEntrySizeAvg:    float64(c.windowEntrySize.Swap(0)) / float64(c.windowEntryCount.Swap(0)),
 		WindowEntryInsertions: c.windowInsertions.Swap(0),
 		WindowEntryEvictions:  c.windowEvictions.Swap(0),

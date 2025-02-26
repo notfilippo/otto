@@ -22,6 +22,7 @@ import (
 type entry struct {
 	hash uint64
 	next *byte
+
 	size int
 
 	frequency atomic.Int32

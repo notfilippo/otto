@@ -18,44 +18,47 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/notfilippo/otto"
 )
 
 const workloadMultiplier = 15
 
-func BenchmarkHitRatio(b *testing.B) {
-	zipfAlphas := []float64{0.99}
-	items := []int{1e5 * 5}
-	concurrencies := []int{1, 2, 4, 8, 16}
-	cacheSizeMultiplier := []float64{0.001, 0.01, 0.1}
+type zipfs struct {
+	s    float64
+	v    float64
+	name string
+}
 
-	b.ReportAllocs()
+func TestHitRatio(t *testing.T) {
+	cacheSizes := []int{100, 500, 1000, 5000}
+	workers := []int{32, 16, 8, 4, 2, 1}
+	ops := 10_000
 
-	for _, itemSize := range items {
-		b.Run(fmt.Sprintf("items-%d", itemSize), func(b *testing.B) {
-			for _, multiplier := range cacheSizeMultiplier {
-				b.Run(fmt.Sprintf("multiplier-%fx", multiplier), func(b *testing.B) {
-					for _, curr := range concurrencies {
-						b.Run(fmt.Sprintf("curr-%d", curr), func(b *testing.B) {
-							for _, alpha := range zipfAlphas {
-								b.Run(fmt.Sprintf("alpha-%f", alpha), func(b *testing.B) {
-									cacheSize := int(float64(itemSize) * multiplier)
-									c := otto.New(32, cacheSize)
+	keySpace := uint64(10000)
 
-									var allHits, allMisses int64
+	// Zipf parameters
+	// s=1.01 is minimally skewed, s=2.0 is highly skewed
+	distributions := []zipfs{
+		{1.1, 1.0, "low skew"},
+		{1.5, 1.0, "medium skew"},
+		{2.0, 1.0, "high skew"},
+	}
 
-									b.ResetTimer()
-									for i := 0; i < b.N; i++ {
-										hits, misses := run(c, itemSize, alpha, curr)
-										allHits += hits
-										allMisses += misses
-									}
+	for _, cacheSize := range cacheSizes {
+		t.Run(fmt.Sprintf("items-%d", cacheSize), func(t *testing.T) {
+			for _, workerCount := range workers {
+				t.Run(fmt.Sprintf("workers-%d", workerCount), func(t *testing.T) {
+					for _, zipf := range distributions {
+						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
+							c := otto.New(32, cacheSize)
+							hits, misses := run(c, keySpace, zipf, workerCount, ops)
+							c.Close()
 
-									b.ReportMetric(float64(allHits)/float64(allHits+allMisses)*100., "hit%")
-								})
-							}
+							t.Logf("%f hit%%", float64(hits)/float64(hits+misses)*100.)
 						})
 					}
 				})
@@ -64,71 +67,95 @@ func BenchmarkHitRatio(b *testing.B) {
 	}
 }
 
-func run(c otto.Cache, itemSize int, zipfAlpha float64, concurrency int) (int64, int64) {
-	gen := NewZipfStringGenerator(uint64(itemSize), zipfAlpha)
+func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (uint64, uint64) {
+	opsPerWorker := ops / concurrency
+	totalOps := opsPerWorker * concurrency
 
-	total := itemSize * workloadMultiplier
-	each := total / concurrency
+	var popularityShift atomic.Uint64
+	go func() {
+		currentShift := uint64(0)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
 
-	// create keys in advance to not taint the QPS
-	keys := make([][]string, concurrency)
-	for i := 0; i < concurrency; i++ {
-		keys[i] = make([]string, 0, each)
-		for j := 0; j < each; j++ {
-			keys[i] = append(keys[i], gen.Next())
+		for i := 0; i < ops/10000; i++ {
+			<-ticker.C
+			currentShift = (currentShift + 1000) % keySpace
+			popularityShift.Store(currentShift)
 		}
-	}
+	}()
 
-	var wg sync.WaitGroup
-	hits := make([]int64, concurrency)
-	misses := make([]int64, concurrency)
+	var (
+		wg           sync.WaitGroup
+		hits, misses atomic.Uint64
+		completedOps atomic.Uint64
+	)
 
-	for i := 0; i < concurrency; i++ {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range time.Tick(500 * time.Millisecond) {
+			fmt.Printf("\r%d/%d", completedOps.Load(), totalOps)
+			if completedOps.Load() >= uint64(totalOps) {
+				fmt.Println()
+				break
+			}
+		}
+	}()
+
+	for workerId := 0; workerId < concurrency; workerId++ {
 		wg.Add(1)
-		go func(k int) {
-			for j := 0; j < each; j++ {
-				key := keys[k][j]
-				val := c.Get(key, nil)
-				if val != nil {
-					hits[k]++
+		go func(workerId int) {
+			defer wg.Done()
+
+			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(workerId))
+			r := rand.New(source)
+			d := rand.NewZipf(r, zipf.s, zipf.v, keySpace-1)
+
+			burstMode := false
+
+			for j := 0; j < opsPerWorker; j++ {
+
+				// Occasionally switch between normal and burst modes
+				if r.Float64() < 0.01 {
+					burstMode = !burstMode
+				}
+
+				// Simulate different access speeds based on mode
+				if burstMode {
+					time.Sleep(time.Microsecond * time.Duration(r.IntN(50)))
 				} else {
-					misses[k]++
+					time.Sleep(time.Millisecond * time.Duration(1+r.IntN(5)))
+				}
+
+				keyRank := (d.Uint64() + popularityShift.Load()) % keySpace
+
+				if r.Float64() < 0.3 {
+					keyRank = (keyRank + uint64(workerId*100)) % keySpace
+				}
+
+				key := fmt.Sprintf("key-%d", keyRank)
+
+				if r.Float64() < 0.85 {
+					item := c.Get(key, nil)
+					if item == nil {
+						misses.Add(1)
+
+						// Simulate backend retrieval
+						time.Sleep(time.Millisecond * time.Duration(5+r.IntN(20)))
+						c.Set(key, []byte{0xAA})
+					} else {
+						hits.Add(1)
+					}
+				} else {
 					c.Set(key, []byte{0xAA})
 				}
+
+				completedOps.Add(1)
 			}
-			wg.Done()
-		}(i)
+		}(workerId)
 	}
 
 	wg.Wait()
 
-	var totalHits, totalMisses int64
-	for i := 0; i < concurrency; i++ {
-		totalHits += hits[i]
-		totalMisses += misses[i]
-	}
-
-	return totalHits, totalMisses
-}
-
-type ZipfStringGenerator struct {
-	gen *ZipfGenerator
-}
-
-func NewZipfStringGenerator(size uint64, theta float64) *ZipfStringGenerator {
-	src := rand.NewPCG(0, 1)
-	r := rand.New(src)
-	gen, err := NewZipfGenerator(r, 0, size, theta, false)
-
-	if err != nil {
-		panic(fmt.Errorf("could not create zipf generator: %v", err))
-	}
-
-	return &ZipfStringGenerator{
-		gen: gen,
-	}
-}
-
-func (z *ZipfStringGenerator) Next() string {
-	return fmt.Sprintf("%d", z.gen.Uint64())
+	return hits.Load(), misses.Load()
 }
