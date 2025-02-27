@@ -38,7 +38,6 @@ type Cache interface {
 
 	Entries() uint64
 
-	SaveToFile(path string) error
 	Serialize(w io.Writer) error
 }
 
@@ -52,11 +51,6 @@ type cache struct {
 	slotSize, slotCount int
 
 	entries atomic.Uint64
-
-	windowEntryCount atomic.Uint64
-	windowEntrySize  atomic.Uint64
-	windowInsertions atomic.Uint64
-	windowEvictions  atomic.Uint64
 }
 
 func New(slotSize, slotCount int) Cache {
@@ -132,10 +126,6 @@ func (c *cache) set(hash uint64, val []byte) {
 
 	c.hashmap.Store(hash, first)
 	c.entries.Add(1)
-
-	c.windowInsertions.Add(1)
-	c.windowEntryCount.Add(1)
-	c.windowEntrySize.Add(uint64(size))
 
 	if c.g.In(hash) {
 		for !c.m.Push(first) {
@@ -252,7 +242,6 @@ func (c *cache) evictEntry(e *entry) {
 	}
 
 	c.entries.Add(^uint64(0))
-	c.windowEvictions.Add(1)
 
 	if e.size < 1 {
 		panic("otto: invariant violated: entry with size zero")
@@ -305,31 +294,15 @@ func (c *cache) Clear() {
 	c.m = newEntryQueue(mCap)
 	c.s = newEntryQueue(sCap)
 	c.g = newGhost(mCap)
+	c.entries.Store(0)
 }
 
 func (c *cache) Close() {
 	c.alloc.Close()
 }
 
-func (c *cache) Metrics() Metrics {
-	return Metrics{
-		WindowEntrySizeAvg:    float64(c.windowEntrySize.Swap(0)) / float64(c.windowEntryCount.Swap(0)),
-		WindowEntryInsertions: c.windowInsertions.Swap(0),
-		WindowEntryEvictions:  c.windowEvictions.Swap(0),
-	}
-}
-
-func (c *cache) SaveToFile(path string) error {
-	file, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-
-	if err := c.Serialize(file); err != nil {
-		return fmt.Errorf("failed to serialize to file: %w", err)
-	}
-
-	return file.Close()
+func (c *cache) Entries() uint64 {
+	return c.entries.Load()
 }
 
 func (c *cache) Serialize(w io.Writer) error {
@@ -355,20 +328,6 @@ func (c *cache) Serialize(w io.Writer) error {
 	})
 
 	return e.Encode(plain)
-}
-
-func LoadFromFile(path string) (Cache, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-
-	cache, err := Deserialize(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize to file: %w", err)
-	}
-
-	return cache, file.Close()
 }
 
 func Deserialize(r io.Reader) (Cache, error) {
@@ -402,4 +361,31 @@ func Deserialize(r io.Reader) (Cache, error) {
 	}
 
 	return c, nil
+}
+
+func SaveToFile(c Cache, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+
+	if err := c.Serialize(file); err != nil {
+		return fmt.Errorf("failed to serialize to file: %w", err)
+	}
+
+	return file.Close()
+}
+
+func LoadFromFile(path string) (Cache, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+
+	cache, err := Deserialize(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize to file: %w", err)
+	}
+
+	return cache, file.Close()
 }

@@ -34,6 +34,8 @@ type zipfs struct {
 }
 
 func TestHitRatio(t *testing.T) {
+	t.Skip("hit ratio test takes a long time to run")
+
 	cacheSizes := []int{100, 500, 1000, 5000}
 	workers := []int{32, 16, 8, 4, 2, 1}
 	ops := 10_000

@@ -322,7 +322,7 @@ func TestCacheFileStorage(t *testing.T) {
 	}
 
 	// Save to file
-	err := cache.SaveToFile(filePath)
+	err := otto.SaveToFile(cache, filePath)
 	if err != nil {
 		t.Fatalf("Failed to save cache to file: %v", err)
 	}
