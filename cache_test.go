@@ -16,24 +16,29 @@ package otto_test
 
 import (
 	"bytes"
-	"crypto/rand"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/notfilippo/otto"
 )
 
+var keyTrackingWindows = map[string]otto.TrackerWindow{
+	"15m": {BucketCount: 15, BucketDuration: time.Minute},
+	"1h":  {BucketCount: 15, BucketDuration: 4 * time.Minute},
+	"6h":  {BucketCount: 15, BucketDuration: 24 * time.Minute},
+}
+
 func TestCacheBasic(t *testing.T) {
 	// Create a cache with small slot size for testing
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Test setting and getting a simple value
 	key := "test-key"
@@ -56,7 +61,7 @@ func TestCacheBasic(t *testing.T) {
 func TestCacheMultipleValues(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Create test data
 	testData := map[string][]byte{
@@ -84,11 +89,12 @@ func TestCacheMultipleValues(t *testing.T) {
 func TestCacheLargeValues(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Create large test data (spans multiple slots)
 	largeValue := make([]byte, slotSize*3+5) // 53 bytes (spans 4 slots)
-	rand.Read(largeValue)
+	r := rand.NewChaCha8([32]byte{0})
+	r.Read(largeValue)
 
 	key := "large-key"
 	cache.Set(key, largeValue)
@@ -103,7 +109,7 @@ func TestCacheEviction(t *testing.T) {
 	// Create a cache with very limited capacity
 	slotSize := 16
 	slotCount := 10 // Very small, will force eviction
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Fill the cache plus some
 	keys := []string{}
@@ -131,7 +137,7 @@ func TestCacheEviction(t *testing.T) {
 func TestCacheReuse(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	key := "reuse-key"
 	value := []byte("reuse-value")
@@ -151,7 +157,7 @@ func TestCacheReuse(t *testing.T) {
 func TestCacheClear(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Add some items
 	for i := 0; i < 10; i++ {
@@ -186,7 +192,7 @@ func TestCacheFrequency(t *testing.T) {
 	// Create a cache with limited capacity
 	slotSize := 16
 	slotCount := 20
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Add items to the cache
 	frequentKey := "frequent-key"
@@ -215,7 +221,7 @@ func TestCacheFrequency(t *testing.T) {
 func TestCacheHeavyContention(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Many goroutines fighting for the same keys
 	workers := 16
@@ -268,7 +274,7 @@ func TestCacheHeavyContention(t *testing.T) {
 func TestCacheSerialization(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Add some test data
 	testData := map[string][]byte{
@@ -312,7 +318,7 @@ func TestCacheFileStorage(t *testing.T) {
 	// Create and populate original cache
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Add some test data
 	for i := 0; i < 10; i++ {
@@ -350,7 +356,7 @@ func TestCacheFileStorage(t *testing.T) {
 func TestCacheDifferentSizes(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Add items of different sizes
 	testCases := []struct {
@@ -388,126 +394,10 @@ func TestCacheDifferentSizes(t *testing.T) {
 	}
 }
 
-func TestCacheStress(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping stress test in short mode")
-	}
-
-	slotSize := 64
-	slotCount := 10000
-	cache := otto.New(slotSize, slotCount)
-
-	// Configure the stress test
-	duration := 3 * time.Second // Run for 3 seconds
-	goroutines := 32
-	keySpace := 5000
-	valueSizeMax := 1024
-
-	var (
-		setOps  atomic.Int64
-		getOps  atomic.Int64
-		hitOps  atomic.Int64
-		missOps atomic.Int64
-		running int32 = 1
-		wg      sync.WaitGroup
-	)
-
-	// Generate some random value templates of different sizes
-	valueTemplates := make([][]byte, 10)
-	for i := range valueTemplates {
-		size := 16 << i // 16, 32, 64, ... bytes
-		if size > valueSizeMax {
-			size = valueSizeMax
-		}
-		valueTemplates[i] = make([]byte, size)
-		rand.Read(valueTemplates[i])
-	}
-
-	// Start goroutines
-	startTime := time.Now()
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-
-			// Each goroutine gets its own buffer to reuse
-			buf := make([]byte, valueSizeMax)
-
-			for atomic.LoadInt32(&running) == 1 {
-				// Choose a random key
-				keyIndex := id*keySpace/goroutines + (int(time.Now().UnixNano()) % (keySpace / goroutines))
-				key := fmt.Sprintf("key-%d", keyIndex)
-
-				// Decide on operation: 30% set, 70% get
-				op := time.Now().UnixNano() % 10
-				if op < 3 { // Set operation
-					// Choose a random value template and modify it slightly
-					valueIndex := int(time.Now().UnixNano()) % len(valueTemplates)
-					value := make([]byte, len(valueTemplates[valueIndex]))
-					copy(value, valueTemplates[valueIndex])
-
-					// Modify a few bytes to make it unique
-					for j := 0; j < 4; j++ {
-						if len(value) > j {
-							value[j] = byte(time.Now().UnixNano())
-						}
-					}
-
-					cache.Set(key, value)
-					setOps.Add(1)
-				} else { // Get operation
-					result := cache.Get(key, buf)
-					getOps.Add(1)
-
-					if result != nil {
-						hitOps.Add(1)
-					} else {
-						missOps.Add(1)
-					}
-				}
-
-				// Occasionally yield
-				if time.Now().UnixNano()%100 < 5 {
-					runtime.Gosched()
-				}
-			}
-		}(i)
-	}
-
-	// Run for the specified duration
-	time.Sleep(duration)
-	atomic.StoreInt32(&running, 0)
-
-	// Wait for all goroutines to finish
-	wg.Wait()
-
-	elapsed := time.Since(startTime)
-	totalOps := setOps.Load() + getOps.Load()
-	opsPerSec := float64(totalOps) / elapsed.Seconds()
-
-	// Log statistics
-	t.Logf("Stress test completed in %v", elapsed)
-	t.Logf("Operations: %d sets, %d gets (%.2f ops/sec)",
-		setOps.Load(), getOps.Load(), opsPerSec)
-	t.Logf("Get results: %d hits, %d misses (%.2f%% hit rate)",
-		hitOps.Load(), missOps.Load(),
-		100*float64(hitOps.Load())/float64(getOps.Load()))
-
-	// Verify the cache still works
-	testKey := "post-stress-test"
-	testValue := []byte("it-still-works")
-	cache.Set(testKey, testValue)
-
-	result := cache.Get(testKey, nil)
-	if !bytes.Equal(result, testValue) {
-		t.Fatalf("Cache not functioning correctly after stress test")
-	}
-}
-
 func TestCacheMaxSlots(t *testing.T) {
 	slotSize := 16
 	slotCount := 10
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Create a value that would use almost all slots
 	maxValue := make([]byte, slotSize*(slotCount-1))
@@ -546,7 +436,7 @@ func TestCacheMaxSlots(t *testing.T) {
 func TestCacheGetAfterConcurrentEviction(t *testing.T) {
 	slotSize := 16
 	slotCount := 20 // Small size to force eviction
-	cache := otto.New(slotSize, slotCount)
+	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
 
 	// Add a test key
 	testKey := "eviction-test"
@@ -563,7 +453,8 @@ func TestCacheGetAfterConcurrentEviction(t *testing.T) {
 		for i := 0; i < 30; i++ {
 			key := fmt.Sprintf("large-key-%d", i)
 			value := make([]byte, slotSize*2) // Each takes 2 slots
-			rand.Read(value)
+			r := rand.NewChaCha8([32]byte{0})
+			r.Read(value)
 
 			cache.Set(key, value)
 

@@ -117,7 +117,7 @@ func (s *TrackerCache) Entries() uint64 {
 }
 
 func (s *TrackerCache) Serialize(w io.Writer) error {
-	return s.Serialize(w)
+	return s.inner.Serialize(w)
 }
 
 func (s *TrackerCache) Hits() uint64 {
