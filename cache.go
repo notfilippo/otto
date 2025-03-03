@@ -69,6 +69,10 @@ func New(slotSize, slotCount int) Cache {
 }
 
 func (c *cache) Set(key string, val []byte) {
+	if val == nil || len(val) == 0 {
+		return
+	}
+
 	hash := maphash.String(c.seed, key)
 
 	if Debug {
@@ -79,10 +83,6 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	if val == nil || len(val) == 0 {
-		return
-	}
-
 	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
 		// Already in the cache and we don't support updates
 		return
@@ -357,6 +357,10 @@ func Deserialize(r io.Reader) (Cache, error) {
 	c.seed = seed
 
 	for k, v := range plain {
+		if v == nil || len(v) == 0 {
+			continue
+		}
+
 		c.set(k, v)
 	}
 

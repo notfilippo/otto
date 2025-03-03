@@ -43,6 +43,10 @@ type queue[T any] struct {
 
 type slotPadded[T any] struct {
 	slot[T]
+	// uintptr was chosen because we will either store a
+	// pointer (*byte in allocator or *entry in entryQueue)
+	// or a uint64 in ghost.
+	//
 	//lint:ignore U1000 prevents false sharing
 	pad [cacheLineSize - unsafe.Sizeof(slot[uintptr]{})]byte
 }
