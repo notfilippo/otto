@@ -30,6 +30,7 @@ type TrackerCache struct {
 
 	seed maphash.Seed
 	seen chan uint64
+	done chan struct{}
 
 	hits, misses, sets, dropped atomic.Uint64
 
@@ -41,6 +42,7 @@ func NewTracker(c Cache, windows map[string]TrackerWindow) *TrackerCache {
 		inner: c,
 		seed:  maphash.MakeSeed(),
 		seen:  make(chan uint64, 128),
+		done:  make(chan struct{}),
 	}
 
 	if len(windows) > 0 {
@@ -73,6 +75,8 @@ func (s *TrackerCache) loop(windows map[string]TrackerWindow) {
 			}
 
 			tracker.track(k)
+		case _ = <-s.done:
+			return
 		}
 	}
 }
@@ -110,6 +114,7 @@ func (s *TrackerCache) Clear() {
 
 func (s *TrackerCache) Close() {
 	s.inner.Close()
+	close(s.done)
 }
 
 func (s *TrackerCache) Entries() uint64 {

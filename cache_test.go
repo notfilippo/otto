@@ -39,6 +39,7 @@ func TestCacheBasic(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Test setting and getting a simple value
 	key := "test-key"
@@ -62,6 +63,7 @@ func TestCacheMultipleValues(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Create test data
 	testData := map[string][]byte{
@@ -90,6 +92,7 @@ func TestCacheLargeValues(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Create large test data (spans multiple slots)
 	largeValue := make([]byte, slotSize*3+5) // 53 bytes (spans 4 slots)
@@ -110,6 +113,7 @@ func TestCacheEviction(t *testing.T) {
 	slotSize := 16
 	slotCount := 10 // Very small, will force eviction
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Fill the cache plus some
 	keys := []string{}
@@ -138,6 +142,7 @@ func TestCacheReuse(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	key := "reuse-key"
 	value := []byte("reuse-value")
@@ -158,6 +163,7 @@ func TestCacheClear(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Add some items
 	for i := 0; i < 10; i++ {
@@ -193,6 +199,7 @@ func TestCacheFrequency(t *testing.T) {
 	slotSize := 16
 	slotCount := 20
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Add items to the cache
 	frequentKey := "frequent-key"
@@ -222,6 +229,7 @@ func TestCacheHeavyContention(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Many goroutines fighting for the same keys
 	workers := 16
@@ -275,6 +283,7 @@ func TestCacheSerialization(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Add some test data
 	testData := map[string][]byte{
@@ -319,6 +328,7 @@ func TestCacheFileStorage(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Add some test data
 	for i := 0; i < 10; i++ {
@@ -357,6 +367,7 @@ func TestCacheDifferentSizes(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Add items of different sizes
 	testCases := []struct {
@@ -398,6 +409,7 @@ func TestCacheMaxSlots(t *testing.T) {
 	slotSize := 16
 	slotCount := 10
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Create a value that would use almost all slots
 	maxValue := make([]byte, slotSize*(slotCount-1))
@@ -437,6 +449,7 @@ func TestCacheGetAfterConcurrentEviction(t *testing.T) {
 	slotSize := 16
 	slotCount := 20 // Small size to force eviction
 	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
+	defer cache.Close()
 
 	// Add a test key
 	testKey := "eviction-test"
