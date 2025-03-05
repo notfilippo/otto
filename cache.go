@@ -46,11 +46,17 @@ type cache struct {
 	m, s    *entryQueue
 	g       *ghost
 	hashmap *hmap
+
+	//lint:ignore U1000 prevents false sharing
+	_       [cacheLineSize - 8]byte
+	entries uint64
+
+	//lint:ignore U1000 prevents false sharing
+	_      [cacheLineSize - 4]byte
+	closed uint32
+
 	seed    maphash.Seed
-
 	slotSize, slotCount int
-
-	entries atomic.Uint64
 }
 
 func New(slotSize, slotCount int) Cache {
@@ -69,7 +75,7 @@ func New(slotSize, slotCount int) Cache {
 }
 
 func (c *cache) Set(key string, val []byte) {
-	if val == nil || len(val) == 0 {
+	if val == nil || len(val) == 0 || atomic.LoadUint32(&c.closed) == 1 {
 		return
 	}
 
@@ -125,7 +131,7 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 
 	c.hashmap.Store(hash, first)
-	c.entries.Add(1)
+	atomic.AddUint64(&c.entries, 1)
 
 	if c.g.In(hash) {
 		for !c.m.Push(first) {
@@ -139,6 +145,10 @@ func (c *cache) set(hash uint64, val []byte) {
 }
 
 func (c *cache) Get(key string, buf []byte) []byte {
+	if atomic.LoadUint32(&c.closed) == 1 {
+		return nil
+	}
+
 	hash := maphash.String(c.seed, key)
 
 	if Debug {
@@ -241,7 +251,7 @@ func (c *cache) evictEntry(e *entry) {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
-	c.entries.Add(^uint64(0))
+	atomic.AddUint64(&c.entries, ^uint64(0))
 
 	if e.size < 1 {
 		panic("otto: invariant violated: entry with size zero")
@@ -294,15 +304,16 @@ func (c *cache) Clear() {
 	c.m = newEntryQueue(mCap)
 	c.s = newEntryQueue(sCap)
 	c.g = newGhost(mCap)
-	c.entries.Store(0)
+	atomic.StoreUint64(&c.entries, 0)
 }
 
 func (c *cache) Close() {
+	atomic.StoreUint32(&c.closed, 1)
 	c.alloc.Close()
 }
 
 func (c *cache) Entries() uint64 {
-	return c.entries.Load()
+	return atomic.LoadUint64(&c.entries)
 }
 
 func (c *cache) Serialize(w io.Writer) error {
