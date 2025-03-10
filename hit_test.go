@@ -25,8 +25,6 @@ import (
 	"github.com/notfilippo/otto"
 )
 
-const workloadMultiplier = 15
-
 type zipfs struct {
 	s    float64
 	v    float64
@@ -79,7 +77,7 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
-		for i := 0; i < ops/10000; i++ {
+		for range ops / 10000 {
 			<-ticker.C
 			currentShift = (currentShift + 1000) % keySpace
 			popularityShift.Store(currentShift)
@@ -104,18 +102,18 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 		}
 	}()
 
-	for workerId := 0; workerId < concurrency; workerId++ {
+	for workerID := range concurrency {
 		wg.Add(1)
-		go func(workerId int) {
+		go func(workerID int) {
 			defer wg.Done()
 
-			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(workerId))
+			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(workerID))
 			r := rand.New(source)
 			d := rand.NewZipf(r, zipf.s, zipf.v, keySpace-1)
 
 			burstMode := false
 
-			for j := 0; j < opsPerWorker; j++ {
+			for range opsPerWorker {
 
 				// Occasionally switch between normal and burst modes
 				if r.Float64() < 0.01 {
@@ -132,7 +130,7 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 				keyRank := (d.Uint64() + popularityShift.Load()) % keySpace
 
 				if r.Float64() < 0.3 {
-					keyRank = (keyRank + uint64(workerId*100)) % keySpace
+					keyRank = (keyRank + uint64(workerID*100)) % keySpace
 				}
 
 				key := fmt.Sprintf("key-%d", keyRank)
@@ -154,7 +152,7 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 
 				completedOps.Add(1)
 			}
-		}(workerId)
+		}(workerID)
 	}
 
 	wg.Wait()

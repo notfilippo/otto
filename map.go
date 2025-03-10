@@ -242,7 +242,7 @@ func (m *hmap) Load(hash uint64) (value *entry, ok bool) {
 	b := &table.buckets[bidx]
 	for {
 		topHashes := atomic.LoadUint64(&b.topHashMutex)
-		for i := 0; i < entriesPerMapBucket; i++ {
+		for i := range entriesPerMapBucket {
 			if !topHashMatch(hash, topHashes, i) {
 				continue
 			}
@@ -445,8 +445,7 @@ func (m *hmap) doCompute(
 		b := rootb
 		for {
 			topHashes := atomic.LoadUint64(&b.topHashMutex)
-			for i := 0; i < entriesPerMapBucket; i++ {
-				// TODO(@notfilippo): check this
+			for i := range entriesPerMapBucket {
 				if b.keys[i] == 0 {
 					if emptyb == nil {
 						emptyb = b
@@ -612,7 +611,7 @@ func (m *hmap) resize(knownTable *mapTable, hint mapResizeHint) {
 	}
 	// Copy the data only if we're not clearing the map.
 	if hint != mapClearHint {
-		for i := 0; i < tableLen; i++ {
+		for i := range tableLen {
 			copied := copyBucket(&table.buckets[i], newTable)
 			newTable.addSizePlain(uint64(i), copied)
 		}
@@ -629,7 +628,7 @@ func copyBucket(b *bucketPadded, destTable *mapTable) (copied int) {
 	rootb := b
 	lockBucket(&rootb.topHashMutex)
 	for {
-		for i := 0; i < entriesPerMapBucket; i++ {
+		for i := range entriesPerMapBucket {
 			if b.keys[i] != 0 {
 				hash := derefKey(b.keys[i])
 				bidx := uint64(len(destTable.buckets)-1) & hash
@@ -648,7 +647,7 @@ func copyBucket(b *bucketPadded, destTable *mapTable) (copied int) {
 
 func appendToBucket(hash uint64, valPtr unsafe.Pointer, b *bucketPadded) {
 	for {
-		for i := 0; i < entriesPerMapBucket; i++ {
+		for i := range entriesPerMapBucket {
 			if b.keys[i] == 0 {
 				b.keys[i] = hash
 				b.values[i] = valPtr
@@ -671,7 +670,7 @@ func appendToBucket(hash uint64, valPtr unsafe.Pointer, b *bucketPadded) {
 func isEmptyBucket(rootb *bucketPadded) bool {
 	b := rootb
 	for {
-		for i := 0; i < entriesPerMapBucket; i++ {
+		for i := range entriesPerMapBucket {
 			if b.keys[i] != 0 {
 				return false
 			}
@@ -709,7 +708,7 @@ func (m *hmap) Range(f func(key uint64, value *entry) bool) {
 		// the intermediate slice.
 		lockBucket(&rootb.topHashMutex)
 		for {
-			for i := 0; i < entriesPerMapBucket; i++ {
+			for i := range entriesPerMapBucket {
 				if b.keys[i] != 0 {
 					bentries = append(bentries, rangeEntry{
 						key:   b.keys[i],
@@ -903,7 +902,7 @@ func (m *hmap) Stats() mapStats {
 		for {
 			nentriesLocal := 0
 			stats.Capacity += entriesPerMapBucket
-			for i := 0; i < entriesPerMapBucket; i++ {
+			for i := range entriesPerMapBucket {
 				if atomic.LoadUint64(&b.keys[i]) != 0 {
 					stats.Size++
 					nentriesLocal++

@@ -117,9 +117,9 @@ func TestCacheEviction(t *testing.T) {
 
 	// Fill the cache plus some
 	keys := []string{}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		key := fmt.Sprintf("key-%d", i)
-		value := []byte(fmt.Sprintf("value-%d", i))
+		value := fmt.Appendf(nil, "value-%d", i)
 		cache.Set(key, value)
 		keys = append(keys, key)
 	}
@@ -166,9 +166,9 @@ func TestCacheClear(t *testing.T) {
 	defer cache.Close()
 
 	// Add some items
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		key := fmt.Sprintf("key-%d", i)
-		value := []byte(fmt.Sprintf("value-%d", i))
+		value := fmt.Appendf(nil, "value-%d", i)
 		cache.Set(key, value)
 	}
 
@@ -176,7 +176,7 @@ func TestCacheClear(t *testing.T) {
 	cache.Clear()
 
 	// Verify all items are gone
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		key := fmt.Sprintf("key-%d", i)
 		if cache.Get(key, nil) != nil {
 			t.Fatalf("Item %s still exists after Clear()", key)
@@ -207,14 +207,14 @@ func TestCacheFrequency(t *testing.T) {
 	cache.Set(frequentKey, frequentValue)
 
 	// Access this key many times to increase its frequency
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		cache.Get(frequentKey, nil)
 	}
 
 	// Fill the cache with other items to force eviction
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		key := fmt.Sprintf("filler-%d", i)
-		value := []byte(fmt.Sprintf("filler-value-%d", i))
+		value := fmt.Appendf(nil, "filler-value-%d", i)
 		cache.Set(key, value)
 	}
 
@@ -239,19 +239,19 @@ func TestCacheHeavyContention(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Start workers
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				// Choose a key (all workers access all keys)
 				keyIndex := i % keys
 				key := fmt.Sprintf("shared-key-%d", keyIndex)
 
 				// Randomly choose between read and write
 				if i%3 == 0 { // 1/3 chance to write
-					value := []byte(fmt.Sprintf("value-%d-%d", id, i))
+					value := fmt.Appendf(nil, "value-%d-%d", id, i)
 					cache.Set(key, value)
 				} else { // 2/3 chance to read
 					cache.Get(key, nil)
@@ -331,9 +331,9 @@ func TestCacheFileStorage(t *testing.T) {
 	defer cache.Close()
 
 	// Add some test data
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		key := fmt.Sprintf("file-key-%d", i)
-		value := []byte(fmt.Sprintf("file-value-%d", i))
+		value := fmt.Appendf(nil, "file-value-%d", i)
 		cache.Set(key, value)
 	}
 
@@ -350,9 +350,9 @@ func TestCacheFileStorage(t *testing.T) {
 	}
 
 	// Verify data
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		key := fmt.Sprintf("file-key-%d", i)
-		expected := []byte(fmt.Sprintf("file-value-%d", i))
+		expected := fmt.Appendf(nil, "file-value-%d", i)
 		result := loadedCache.Get(key, nil)
 		if !bytes.Equal(result, expected) {
 			t.Fatalf("After file loading, for key %q, expected %q, got %q", key, expected, result)
@@ -463,7 +463,7 @@ func TestCacheGetAfterConcurrentEviction(t *testing.T) {
 		defer wg.Done()
 
 		// Add many large values to force eviction
-		for i := 0; i < 30; i++ {
+		for i := range 30 {
 			key := fmt.Sprintf("large-key-%d", i)
 			value := make([]byte, slotSize*2) // Each takes 2 slots
 			r := rand.NewChaCha8([32]byte{0})
@@ -477,7 +477,7 @@ func TestCacheGetAfterConcurrentEviction(t *testing.T) {
 	}()
 
 	// Try to get the test key repeatedly while the eviction is happening
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		result := cache.Get(testKey, nil)
 
 		// Either it's our value or it's nil (evicted)

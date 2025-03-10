@@ -55,7 +55,7 @@ type cache struct {
 	_      [cacheLineSize - 4]byte
 	closed uint32
 
-	seed    maphash.Seed
+	seed                maphash.Seed
 	slotSize, slotCount int
 }
 
@@ -75,7 +75,7 @@ func New(slotSize, slotCount int) Cache {
 }
 
 func (c *cache) Set(key string, val []byte) {
-	if val == nil || len(val) == 0 || atomic.LoadUint32(&c.closed) == 1 {
+	if len(val) == 0 || atomic.LoadUint32(&c.closed) == 1 {
 		return
 	}
 
@@ -368,7 +368,7 @@ func Deserialize(r io.Reader) (Cache, error) {
 	c.seed = seed
 
 	for k, v := range plain {
-		if v == nil || len(v) == 0 {
+		if len(v) == 0 {
 			continue
 		}
 

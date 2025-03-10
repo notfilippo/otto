@@ -75,7 +75,7 @@ func (s *TrackerCache) loop(windows map[string]TrackerWindow) {
 			}
 
 			tracker.track(k)
-		case _ = <-s.done:
+		case <-s.done:
 			return
 		}
 	}
