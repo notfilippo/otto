@@ -333,7 +333,7 @@ func TestQueueTryDequeueBatch_HighContention(t *testing.T) {
 				switch op {
 				case 0: // Enqueue
 					if atomic.LoadInt64(&enqueueCount) < itemCount {
-						if q.TryEnqueue(fmt.Sprintf("item-%d", enqueueCount)) {
+						if q.TryEnqueue(fmt.Sprintf("item-%d", atomic.LoadInt64(&enqueueCount))) {
 							// Successfully enqueued
 							atomic.AddInt64(&enqueueCount, 1)
 						}
@@ -437,7 +437,7 @@ func TestQueueTryDequeueBatch_Stress(t *testing.T) {
 				op := r.Intn(10)
 
 				if op < 5 { // 50% chance to enqueue
-					item := fmt.Sprintf("item-%d-%d", id, enqueueCount+1)
+					item := fmt.Sprintf("item-%d-%d", id, atomic.LoadInt64(&enqueueCount)+1)
 					if q.TryEnqueue(item) {
 						atomic.AddInt64(&enqueueCount, 1)
 						atomic.AddInt64(&opsComplete, 1)
