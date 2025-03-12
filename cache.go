@@ -59,14 +59,33 @@ type cache struct {
 	slotSize, slotCount int
 }
 
+// New creates a new otto.Cache with a fixed
+// size of slotSize * slotCount. Calling the
+// Set method on a full cache will cause
+// elements to be evicted according to the
+// S3-FIFO algorithm.
 func New(slotSize, slotCount int) Cache {
-	mCap := (slotCount * 90) / 100
-	sCap := slotCount - mCap
+	mCapacity := (slotCount * 90) / 100
+	sCapacity := slotCount - mCapacity
+	return NewEx(slotSize, mCapacity, sCapacity)
+}
+
+// NewEx creates a new otto.Cache with a fixed
+// size of slotSize * (mCapacity + sCapacity).
+// Calling the Set method on a full cache will
+// cause elements to be evicted according to
+// the S3-FIFO algorithm.
+//
+// mCapacity and sCapacity configure the size
+// of the m and the s queue respectively. To
+// learn more about S3-FIFO visit https://s3fifo.com/
+func NewEx(slotSize, mCapacity, sCapacity int) Cache {
+	slotCount := mCapacity + sCapacity
 	return &cache{
 		alloc:     newAllocator(slotSize+entrySize, slotCount),
-		m:         newEntryQueue(mCap),
-		s:         newEntryQueue(sCap),
-		g:         newGhost(mCap),
+		m:         newEntryQueue(mCapacity),
+		s:         newEntryQueue(sCapacity),
+		g:         newGhost(mCapacity),
 		hashmap:   newMap(withPresize(slotCount)),
 		seed:      maphash.MakeSeed(),
 		slotSize:  slotSize,
@@ -74,6 +93,11 @@ func New(slotSize, slotCount int) Cache {
 	}
 }
 
+// Set inserts an item in the cache. If the
+// cache is full an element will be evicted
+// according to the S3-FIFO algorithm.
+//
+// NOTE: updates are not supported.
 func (c *cache) Set(key string, val []byte) {
 	if len(val) == 0 || atomic.LoadUint32(&c.closed) == 1 {
 		return
@@ -144,6 +168,9 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 }
 
+// Get retrieves - if available - an item from the
+// cache. If the item does not exist the cache will
+// return nil.
 func (c *cache) Get(key string, buf []byte) []byte {
 	if atomic.LoadUint32(&c.closed) == 1 {
 		return nil
