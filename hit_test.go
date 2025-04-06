@@ -32,11 +32,17 @@ type zipfs struct {
 }
 
 func TestHitRatio(t *testing.T) {
-	t.Skip("hit ratio test takes a long time to run")
+	if testing.Short() {
+		t.Skip("hit ratio test takes a long time to run")
+	} else {
+		t.Log("hit ratio test started. the test can take a lot of time to run, use `go test --short` to skip it")
+	}
 
-	cacheSizes := []int{100, 500, 1000, 5000}
-	workers := []int{32, 16, 8, 4, 2, 1}
-	ops := 10_000
+	// Always fixed because for each slot we always write []byte{0xAA}
+	slotSize := 32
+
+	slotCounts := []int{100, 500, 1000, 5000}
+	concurrency := []int{1, 2, 4, 8, 16, 32}
 
 	keySpace := uint64(10000)
 
@@ -48,14 +54,17 @@ func TestHitRatio(t *testing.T) {
 		{2.0, 1.0, "high skew"},
 	}
 
-	for _, cacheSize := range cacheSizes {
-		t.Run(fmt.Sprintf("items-%d", cacheSize), func(t *testing.T) {
-			for _, workerCount := range workers {
-				t.Run(fmt.Sprintf("workers-%d", workerCount), func(t *testing.T) {
+	// Ops per worker.
+	ops := 500
+
+	for _, slotCount := range slotCounts {
+		t.Run(fmt.Sprintf("items-%d", slotCount), func(t *testing.T) {
+			for _, concurrency := range concurrency {
+				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := otto.New(32, cacheSize)
-							hits, misses := run(c, keySpace, zipf, workerCount, ops)
+							c := otto.New(slotSize, slotCount)
+							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 
 							t.Logf("%f hit%%", float64(hits)/float64(hits+misses)*100.)
@@ -68,9 +77,6 @@ func TestHitRatio(t *testing.T) {
 }
 
 func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (uint64, uint64) {
-	opsPerWorker := ops / concurrency
-	totalOps := opsPerWorker * concurrency
-
 	var popularityShift atomic.Uint64
 	go func() {
 		currentShift := uint64(0)
@@ -93,10 +99,11 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		totalOps := ops * concurrency
 		for range time.Tick(500 * time.Millisecond) {
 			fmt.Printf("\r%d/%d", completedOps.Load(), totalOps)
 			if completedOps.Load() >= uint64(totalOps) {
-				fmt.Println()
+				fmt.Print("\r")
 				break
 			}
 		}
@@ -113,8 +120,7 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 
 			burstMode := false
 
-			for range opsPerWorker {
-
+			for range ops {
 				// Occasionally switch between normal and burst modes
 				if r.Float64() < 0.01 {
 					burstMode = !burstMode
