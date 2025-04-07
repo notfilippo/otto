@@ -232,13 +232,13 @@ func (c *cache) evictS() {
 			c.g.Add(t.hash)
 			c.evictEntry(t)
 			return
-		} else {
-			for !c.m.Push(t) {
-				c.evictM()
-			}
-			for c.m.IsFull() {
-				c.evictM()
-			}
+		}
+
+		for !c.m.Push(t) {
+			c.evictM()
+		}
+		for c.m.IsFull() {
+			c.evictM()
 		}
 
 		t, ok = c.s.Pop()
@@ -251,17 +251,17 @@ func (c *cache) evictM() {
 		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.evictEntry(t)
 			return
-		} else {
-			for {
-				freq := t.frequency.Load()
+		}
 
-				if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
-					for !c.m.Push(t) {
-						c.evictM()
-					}
+		for {
+			freq := t.frequency.Load()
 
-					break
+			if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
+				for !c.m.Push(t) {
+					c.evictM()
 				}
+
+				break
 			}
 		}
 
