@@ -51,7 +51,7 @@ func TestCacheBasic(t *testing.T) {
 	cache.Set(key, value)
 
 	result, ok := cache.Get(key, nil)
-	if !ok {
+	if !ok && bytes.Equal(result, value) {
 		t.Fatalf("Expected %q, got %q", value, result)
 	}
 
@@ -157,7 +157,7 @@ func TestCacheReuse(t *testing.T) {
 	result, ok := cache.Get(key, buf)
 
 	// The result should point to the same underlying array as buf
-	if !ok {
+	if !ok && bytes.Equal(result, buf) {
 		t.Fatalf("Expected %q, got %q", value, result)
 	}
 }

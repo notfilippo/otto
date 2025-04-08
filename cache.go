@@ -126,6 +126,9 @@ func New(cap int) Cache {
 func (c *cache) Set(key string, value []byte) bool {
 	weight := len(value)
 	if weight > c.cap {
+		if Debug {
+			log.Printf("skipping key %s, too large %d > %d", key, weight, c.cap)
+		}
 		return false
 	}
 

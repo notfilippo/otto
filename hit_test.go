@@ -69,16 +69,11 @@ func TestHitRatio(t *testing.T) {
 				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := New(size)
+							c := New(size * 10)
 							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 
 							t.Logf("%f hit%%", float64(hits)/float64(hits+misses)*100.)
-
-							fmt.Println("expected", size)
-							fmt.Println("window", c.(*cache).windowSize)
-							fmt.Println("probation", c.(*cache).size-c.(*cache).windowSize-c.(*cache).protectedSize)
-							fmt.Println("protected", c.(*cache).protectedSize)
 						})
 					}
 				})
@@ -152,19 +147,20 @@ func run(c Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (uint64
 
 				key := fmt.Sprintf("key-%d", keyRank)
 
+				var data []byte
 				if r.Float64() < 0.85 {
-					_, ok := c.Get(key, nil)
-					if !ok {
+					data, ok := c.Get(key, data)
+					if !ok || string(data) != key {
 						misses.Add(1)
 
 						// Simulate backend retrieval
 						time.Sleep(time.Millisecond * time.Duration(5+r.IntN(20)))
-						c.Set(key, []byte{0xAA})
+						c.Set(key, []byte(key))
 					} else {
 						hits.Add(1)
 					}
 				} else {
-					c.Set(key, []byte{0xAA})
+					c.Set(key, []byte(key))
 				}
 
 				completedOps.Add(1)
