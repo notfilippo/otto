@@ -165,7 +165,7 @@ func (c *cache) get(hash uint64, dst []byte) ([]byte, bool) {
 	}
 
 	if cap(dst) < entry.buf.Len() {
-		dst = make([]byte, entry.buf.Len())
+		dst = make([]byte, 0, entry.buf.Len())
 	}
 
 	start := dst
