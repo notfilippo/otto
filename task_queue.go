@@ -114,6 +114,13 @@ func (g *taskQueue) Clear() {
 	g.mutex.Unlock()
 }
 
+func (g *taskQueue) Empty() bool {
+	g.mutex.Lock()
+	empty := g.count == 0
+	g.mutex.Unlock()
+	return empty
+}
+
 func (g *taskQueue) grow() {
 	if g.count != len(g.buf) {
 		return

@@ -43,6 +43,9 @@ func LoadFromFile(path string) (Cache, error) {
 }
 
 func (c *cache) Serialize(w io.Writer) error {
+	c.evictionLock.Lock()
+	defer c.evictionLock.Unlock()
+
 	e := gob.NewEncoder(w)
 
 	if err := e.Encode(c.cap); err != nil {
@@ -70,13 +73,11 @@ func (c *cache) Serialize(w io.Writer) error {
 		return err
 	}
 
-	c.evictionLock.Lock()
-	defer c.evictionLock.Unlock()
-
 	entryDeques := []entryDeque{c.window, c.probation, c.protected}
 	for _, deque := range entryDeques {
 		var elements []serializedEntry
 		for node := deque.head; node != nil; node = node.next {
+			fmt.Println(node)
 			elements = append(elements, serializedEntry{
 				Hash: node.hash,
 				Dead: node.dead.Load(),

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"runtime"
 	"sync"
 )
 
@@ -187,6 +188,9 @@ func (c *cache) close(t task) {
 func (c *cache) loop() {
 	for {
 		task := c.writeBuffer.Pop()
+		if Debug {
+			log.Printf("executing task %v", task)
+		}
 
 		c.evictionLock.Lock()
 		c.onWrite(task)
@@ -604,4 +608,10 @@ func (c *cache) afterRead(e *entry) {
 
 func (c *cache) Entries() int {
 	return c.data.Size()
+}
+
+func (c *cache) WaitForIdle() {
+	for !c.writeBuffer.Empty() {
+		runtime.Gosched()
+	}
 }

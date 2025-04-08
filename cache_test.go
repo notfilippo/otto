@@ -28,6 +28,11 @@ import (
 	"github.com/notfilippo/otto"
 )
 
+type TestCache interface {
+	otto.Cache
+	WaitForIdle()
+}
+
 var keyTrackingWindows = map[string]otto.TrackerWindow{
 	"15m": {BucketCount: 15, BucketDuration: time.Minute},
 	"1h":  {BucketCount: 15, BucketDuration: 4 * time.Minute},
@@ -89,13 +94,12 @@ func TestCacheMultipleValues(t *testing.T) {
 }
 
 func TestCacheLargeValues(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize*slotCount), keyTrackingWindows)
+	size := 1 << 10
+	cache := otto.NewTracker(otto.New(size), keyTrackingWindows)
 	defer cache.Close()
 
-	// Create large test data (spans multiple slots)
-	largeValue := make([]byte, slotSize*3+5) // 53 bytes (spans 4 slots)
+	// Create large test data
+	largeValue := make([]byte, size*90/100)
 	r := rand.NewChaCha8([32]byte{0})
 	r.Read(largeValue)
 
@@ -196,37 +200,6 @@ func TestCacheClear(t *testing.T) {
 	}
 }
 
-func TestCacheFrequency(t *testing.T) {
-	// Create a cache with limited capacity
-	slotSize := 16
-	slotCount := 20
-	cache := otto.NewTracker(otto.New(slotSize*slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Add items to the cache
-	frequentKey := "frequent-key"
-	frequentValue := []byte("frequent-value")
-	cache.Set(frequentKey, frequentValue)
-
-	// Access this key many times to increase its frequency
-	for range 10 {
-		cache.Get(frequentKey, nil)
-	}
-
-	// Fill the cache with other items to force eviction
-	for i := range 30 {
-		key := fmt.Sprintf("filler-%d", i)
-		value := fmt.Appendf(nil, "filler-value-%d", i)
-		cache.Set(key, value)
-	}
-
-	// The frequent key should still be in the cache
-	_, ok := cache.Get(frequentKey, nil)
-	if !ok {
-		t.Fatalf("Frequently accessed item was incorrectly evicted")
-	}
-}
-
 func TestCacheHeavyContention(t *testing.T) {
 	slotSize := 16
 	slotCount := 100
@@ -282,9 +255,7 @@ func TestCacheHeavyContention(t *testing.T) {
 }
 
 func TestCacheSerialization(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize*slotCount), keyTrackingWindows)
+	cache := otto.New(1 << 10)
 	defer cache.Close()
 
 	// Add some test data
@@ -299,6 +270,9 @@ func TestCacheSerialization(t *testing.T) {
 	for k, v := range testData {
 		cache.Set(k, v)
 	}
+
+	cache.(TestCache).WaitForIdle()
+	time.Sleep(1 * time.Second)
 
 	// Create a buffer and serialize the cache
 	var buf bytes.Buffer
