@@ -16,14 +16,25 @@ package otto_test
 
 import (
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"net/http"
+	_ "net/http/pprof"
+
 	"github.com/notfilippo/otto"
 )
+
+func TestMain(m *testing.M) {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+	m.Run()
+}
 
 type zipfs struct {
 	s    float64
@@ -38,10 +49,7 @@ func TestHitRatio(t *testing.T) {
 		t.Log("hit ratio test started. the test can take a lot of time to run, use `go test --short` to skip it")
 	}
 
-	// Always fixed because for each slot we always write []byte{0xAA}
-	slotSize := 32
-
-	slotCounts := []int{100, 500, 1000, 5000}
+	sizes := []int{100, 500, 1000, 5000}
 	concurrency := []int{1, 2, 4, 8, 16, 32}
 
 	keySpace := uint64(10000)
@@ -57,13 +65,13 @@ func TestHitRatio(t *testing.T) {
 	// Ops per worker.
 	ops := 500
 
-	for _, slotCount := range slotCounts {
-		t.Run(fmt.Sprintf("items-%d", slotCount), func(t *testing.T) {
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("size-%d", size), func(t *testing.T) {
 			for _, concurrency := range concurrency {
 				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := otto.New(slotSize, slotCount)
+							c := otto.New(32, size)
 							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 
@@ -141,19 +149,20 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 
 				key := fmt.Sprintf("key-%d", keyRank)
 
+				var data []byte
 				if r.Float64() < 0.85 {
-					item := c.Get(key, nil)
-					if item == nil {
+					data := c.Get(key, data)
+					if len(data) == 0 || string(data) != key {
 						misses.Add(1)
 
 						// Simulate backend retrieval
 						time.Sleep(time.Millisecond * time.Duration(5+r.IntN(20)))
-						c.Set(key, []byte{0xAA})
+						c.Set(key, []byte(key))
 					} else {
 						hits.Add(1)
 					}
 				} else {
-					c.Set(key, []byte{0xAA})
+					c.Set(key, []byte(key))
 				}
 
 				completedOps.Add(1)

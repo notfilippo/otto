@@ -31,11 +31,23 @@ var (
 )
 
 type Cache interface {
+	// Set inserts an item in the cache. If the cache is full an element
+	// will be evicted according to the S3-FIFO algorithm.
+	//
+	// NOTE: updates are not supported.
 	Set(key string, val []byte)
+
+	// Get retrieves - if available - an item from the cache. If the item
+	// does not exist this method will return nil.
 	Get(key string, buf []byte) []byte
+
+	// Clear the cache, removing every entry without freeing the memory.
 	Clear()
+
+	// Clear the cache, removing every entry and freeing the memory.
 	Close()
 
+	// Returns the number of entries currently stored in the cache.
 	Entries() uint64
 
 	Serialize(w io.Writer) error
@@ -47,22 +59,15 @@ type cache struct {
 	g       *ghost
 	hashmap *hmap
 
-	//lint:ignore U1000 prevents false sharing
-	_       [cacheLineSize - 8]byte
-	entries uint64
-
-	//lint:ignore U1000 prevents false sharing
-	_      [cacheLineSize - 4]byte
-	closed uint32
+	entries atomic.Uint64
+	closed  atomic.Bool
 
 	seed                maphash.Seed
 	slotSize, slotCount int
 }
 
-// New creates a new otto.Cache with a fixed
-// size of slotSize * slotCount. Calling the
-// Set method on a full cache will cause
-// elements to be evicted according to the
+// New creates a new otto.Cache with a fixed size of slotSize * slotCount. Calling the
+// Set method on a full cache will cause elements to be evicted according to the
 // S3-FIFO algorithm.
 func New(slotSize, slotCount int) Cache {
 	mCapacity := (slotCount * 90) / 100
@@ -70,14 +75,11 @@ func New(slotSize, slotCount int) Cache {
 	return NewEx(slotSize, mCapacity, sCapacity)
 }
 
-// NewEx creates a new otto.Cache with a fixed
-// size of slotSize * (mCapacity + sCapacity).
-// Calling the Set method on a full cache will
-// cause elements to be evicted according to
+// NewEx creates a new otto.Cache with a fixed size of slotSize * (mCapacity + sCapacity).
+// Calling the Set method on a full cache will cause elements to be evicted according to
 // the S3-FIFO algorithm.
 //
-// mCapacity and sCapacity configure the size
-// of the m and the s queue respectively. To
+// mCapacity and sCapacity configure the size of the m and the s queue respectively. To
 // learn more about S3-FIFO visit https://s3fifo.com/
 func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 	slotCount := mCapacity + sCapacity
@@ -93,13 +95,8 @@ func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 	}
 }
 
-// Set inserts an item in the cache. If the
-// cache is full an element will be evicted
-// according to the S3-FIFO algorithm.
-//
-// NOTE: updates are not supported.
 func (c *cache) Set(key string, val []byte) {
-	if len(val) == 0 || atomic.LoadUint32(&c.closed) == 1 {
+	if len(val) == 0 || c.closed.Load() {
 		return
 	}
 
@@ -155,7 +152,7 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 
 	c.hashmap.Store(hash, first)
-	atomic.AddUint64(&c.entries, 1)
+	c.entries.Add(1)
 
 	if c.g.In(hash) {
 		for !c.m.Push(first) {
@@ -168,11 +165,8 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 }
 
-// Get retrieves - if available - an item from the
-// cache. If the item does not exist the cache will
-// return nil.
 func (c *cache) Get(key string, buf []byte) []byte {
-	if atomic.LoadUint32(&c.closed) == 1 {
+	if c.closed.Load() {
 		return nil
 	}
 
@@ -278,7 +272,7 @@ func (c *cache) evictEntry(e *entry) {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
-	atomic.AddUint64(&c.entries, ^uint64(0))
+	c.entries.Add(^uint64(0))
 
 	if e.size < 1 {
 		panic("otto: invariant violated: entry with size zero")
@@ -312,6 +306,11 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 	slot := (*byte)(unsafe.Pointer(e))
 	for i := range slots {
 		e := (*entry)(unsafe.Pointer(slot))
+		if slot == nil {
+			// Corruption happened, returning nil
+			return nil
+		}
+
 		source := unsafe.Slice(slot, c.slotSize+entrySize)
 
 		end := min((i+1)*c.slotSize, size)
@@ -331,16 +330,16 @@ func (c *cache) Clear() {
 	c.m = newEntryQueue(mCap)
 	c.s = newEntryQueue(sCap)
 	c.g = newGhost(mCap)
-	atomic.StoreUint64(&c.entries, 0)
+	c.entries.Store(0)
 }
 
 func (c *cache) Close() {
-	atomic.StoreUint32(&c.closed, 1)
+	c.closed.Store(true)
 	c.alloc.Close()
 }
 
 func (c *cache) Entries() uint64 {
-	return atomic.LoadUint64(&c.entries)
+	return c.entries.Load()
 }
 
 func (c *cache) Serialize(w io.Writer) error {
