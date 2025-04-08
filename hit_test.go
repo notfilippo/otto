@@ -12,18 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package otto_test
+package otto
 
 import (
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/notfilippo/otto"
+	"net/http"
+	_ "net/http/pprof"
 )
+
+func TestMain(m *testing.M) {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+	m.Run()
+}
 
 type zipfs struct {
 	s    float64
@@ -38,10 +47,7 @@ func TestHitRatio(t *testing.T) {
 		t.Log("hit ratio test started. the test can take a lot of time to run, use `go test --short` to skip it")
 	}
 
-	// Always fixed because for each slot we always write []byte{0xAA}
-	slotSize := 32
-
-	slotCounts := []int{100, 500, 1000, 5000}
+	sizes := []int{100, 500, 1000, 5000}
 	concurrency := []int{1, 2, 4, 8, 16, 32}
 
 	keySpace := uint64(10000)
@@ -57,17 +63,22 @@ func TestHitRatio(t *testing.T) {
 	// Ops per worker.
 	ops := 500
 
-	for _, slotCount := range slotCounts {
-		t.Run(fmt.Sprintf("items-%d", slotCount), func(t *testing.T) {
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("size-%d", size), func(t *testing.T) {
 			for _, concurrency := range concurrency {
 				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := otto.New(slotSize, slotCount)
+							c := New(size)
 							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 
 							t.Logf("%f hit%%", float64(hits)/float64(hits+misses)*100.)
+
+							fmt.Println("expected", size)
+							fmt.Println("window", c.(*cache).windowSize)
+							fmt.Println("probation", c.(*cache).size-c.(*cache).windowSize-c.(*cache).protectedSize)
+							fmt.Println("protected", c.(*cache).protectedSize)
 						})
 					}
 				})
@@ -76,7 +87,7 @@ func TestHitRatio(t *testing.T) {
 	}
 }
 
-func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (uint64, uint64) {
+func run(c Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (uint64, uint64) {
 	var popularityShift atomic.Uint64
 	go func() {
 		currentShift := uint64(0)
@@ -142,8 +153,8 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 				key := fmt.Sprintf("key-%d", keyRank)
 
 				if r.Float64() < 0.85 {
-					item := c.Get(key, nil)
-					if item == nil {
+					_, ok := c.Get(key, nil)
+					if !ok {
 						misses.Add(1)
 
 						// Simulate backend retrieval

@@ -15,51 +15,108 @@
 package otto
 
 import (
+	"bytes"
+	"sync"
 	"sync/atomic"
-	"unsafe"
+)
+
+type queueType uint8
+
+const (
+	queueWindow queueType = iota
+	queueProbation
+	queueProtected
 )
 
 type entry struct {
-	hash uint64
-	next *byte
-
-	size int
-
-	frequency atomic.Int32
-	access    atomic.Int32
+	hash       uint64
+	dead       atomic.Bool
+	queue      queueType
+	next, prev *entry
+	buf        bytes.Buffer
+	bufLock    sync.RWMutex
 }
 
-var entrySize = int(unsafe.Sizeof(entry{}))
-
-type entryQueue struct {
-	fifo *queue[*entry]
-	size atomic.Int64
+func (e *entry) reset() {
+	e.hash = 0
+	e.dead.Store(false)
+	e.queue = queueWindow
+	e.next = nil
+	e.prev = nil
+	e.buf.Reset()
 }
 
-func newEntryQueue(cap int) *entryQueue {
-	return &entryQueue{
-		fifo: newQueue[*entry](cap),
+func (e *entry) weight() int {
+	return e.buf.Len()
+}
+
+type entryDeque struct {
+	head, tail *entry
+}
+
+func (q *entryDeque) Contains(e *entry) bool {
+	return e.prev != nil || e.next != nil || e == q.head
+}
+
+func (q *entryDeque) Remove(e *entry) {
+	if q.Contains(e) {
+		q.unlink(e)
 	}
 }
 
-func (q *entryQueue) Push(e *entry) bool {
-	size := e.size
-	if q.fifo.TryEnqueue(e) {
-		q.size.Add(int64(size))
-		return true
+func (q *entryDeque) MoveBack(e *entry) {
+	if q.Contains(e) && e != q.tail {
+		q.unlink(e)
+		q.pushBack(e)
 	}
-
-	return false
 }
 
-func (q *entryQueue) Pop() (*entry, bool) {
-	if e, ok := q.fifo.TryDequeue(); ok {
-		q.size.Add(-int64(e.size))
-		return e, true
+func (q *entryDeque) OfferFront(e *entry) {
+	if !q.Contains(e) {
+		q.pushFront(e)
 	}
-	return nil, false
 }
 
-func (q *entryQueue) IsFull() bool {
-	return q.size.Load() >= int64(q.fifo.cap)
+func (q *entryDeque) OfferBack(e *entry) {
+	if !q.Contains(e) {
+		q.pushBack(e)
+	}
+}
+
+func (q *entryDeque) pushFront(e *entry) {
+	if q.head == nil {
+		q.head = e
+		q.tail = e
+	} else {
+		e.next = q.head
+		q.head.prev = e
+		q.head = e
+	}
+}
+
+func (q *entryDeque) pushBack(e *entry) {
+	if q.tail == nil {
+		q.head = e
+		q.tail = e
+	} else {
+		e.prev = q.tail
+		q.tail.next = e
+		q.tail = e
+	}
+}
+
+func (q *entryDeque) unlink(e *entry) {
+	if e.prev == nil {
+		q.head = e.next
+	} else {
+		e.prev.next = e.next
+		e.prev = nil
+	}
+
+	if e.next == nil {
+		q.tail = e.prev
+	} else {
+		e.next.prev = e.prev
+		e.next = nil
+	}
 }

@@ -15,6 +15,7 @@
 package otto
 
 import (
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/cpu"
@@ -24,3 +25,33 @@ const (
 	// cacheLineSize is used in paddings to prevent false sharing
 	cacheLineSize = unsafe.Sizeof(cpu.CacheLinePad{})
 )
+
+// roundUpPowerOf2 is based on https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2.
+func roundUpPowerOf2(v uint32) uint32 {
+	if v == 0 {
+		return 1
+	}
+	v--
+	v |= v >> 1
+	v |= v >> 2
+	v |= v >> 4
+	v |= v >> 8
+	v |= v >> 16
+	v++
+	return v
+}
+
+func availableParallelism() int {
+	maxProcs := runtime.GOMAXPROCS(0)
+	numCPU := runtime.NumCPU()
+
+	if maxProcs < numCPU {
+		return maxProcs
+	}
+
+	return numCPU
+}
+
+//go:noescape
+//go:linkname fastrand runtime.fastrand
+func fastrand() uint32

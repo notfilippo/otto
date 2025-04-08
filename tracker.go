@@ -81,10 +81,10 @@ func (s *TrackerCache) loop(windows map[string]TrackerWindow) {
 	}
 }
 
-func (s *TrackerCache) Get(key string, buf []byte) []byte {
-	result := s.inner.Get(key, buf)
+func (s *TrackerCache) Get(key string, buf []byte) ([]byte, bool) {
+	result, ok := s.inner.Get(key, buf)
 
-	if len(result) > 0 {
+	if ok {
 		s.hits.Add(1)
 
 		select {
@@ -96,12 +96,12 @@ func (s *TrackerCache) Get(key string, buf []byte) []byte {
 		s.misses.Add(1)
 	}
 
-	return result
+	return result, ok
 }
 
-func (s *TrackerCache) Set(key string, val []byte) {
+func (s *TrackerCache) Set(key string, val []byte) bool {
 	s.sets.Add(1)
-	s.inner.Set(key, val)
+	return s.inner.Set(key, val)
 }
 
 func (s *TrackerCache) Clear() {
@@ -117,7 +117,7 @@ func (s *TrackerCache) Close() {
 	close(s.done)
 }
 
-func (s *TrackerCache) Entries() uint64 {
+func (s *TrackerCache) Entries() int {
 	return s.inner.Entries()
 }
 

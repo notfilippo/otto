@@ -12,9 +12,8 @@ import (
 )
 
 func main() {
-    chunkSize := 1024
-    chunkCount := 256
-    cache := otto.New(chunkSize, chunkCount)
+    size := 1234
+    cache := otto.New(size)
 
     cache.Set("key", []byte("value"))
 
