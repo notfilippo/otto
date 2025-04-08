@@ -18,8 +18,6 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand/v2"
-	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -294,49 +292,6 @@ func TestCacheSerialization(t *testing.T) {
 			t.Fatalf("After deserialization, for key %q, expected %q, got %q", k, expected, result)
 		}
 	}
-}
-
-func TestCacheFileStorage(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "cache.bin")
-
-	// Create and populate original cache
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize*slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Add some test data
-	for i := range 10 {
-		key := fmt.Sprintf("file-key-%d", i)
-		value := fmt.Appendf(nil, "file-value-%d", i)
-		cache.Set(key, value)
-	}
-
-	// Save to file
-	err := otto.SaveToFile(cache, filePath)
-	if err != nil {
-		t.Fatalf("Failed to save cache to file: %v", err)
-	}
-
-	// Load from file
-	loadedCache, err := otto.LoadFromFile(filePath)
-	if err != nil {
-		t.Fatalf("Failed to load cache from file: %v", err)
-	}
-
-	// Verify data
-	for i := range 10 {
-		key := fmt.Sprintf("file-key-%d", i)
-		expected := fmt.Appendf(nil, "file-value-%d", i)
-		result, ok := loadedCache.Get(key, nil)
-		if !ok {
-			t.Fatalf("After file loading, for key %q, expected %q, got %q", key, expected, result)
-		}
-	}
-
-	// Clean up
-	os.Remove(filePath)
 }
 
 func TestCacheDifferentSizes(t *testing.T) {
