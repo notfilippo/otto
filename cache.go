@@ -168,13 +168,12 @@ func (c *cache) get(hash uint64, dst []byte) ([]byte, bool) {
 		dst = make([]byte, 0, entry.buf.Len())
 	}
 
-	start := dst
 	dst = append(dst, entry.buf.Bytes()...)
 	entry.bufLock.RUnlock()
 
 	c.afterRead(entry)
 
-	return start, true
+	return dst, true
 }
 
 func (c *cache) Get(key string, dst []byte) ([]byte, bool) {
