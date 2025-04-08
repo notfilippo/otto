@@ -58,11 +58,11 @@ type stripedBuffer struct {
 
 	returned unsafe.Pointer
 	//lint:ignore U1000 prevents false sharing
-	returnedPadding [cacheLineSize - 8]byte
+	returnedPadding [cacheLineSize - pointerSize]byte
 
 	returnedSlice unsafe.Pointer
 	//lint:ignore U1000 prevents false sharing
-	returnedSlicePadding [cacheLineSize - 8]byte
+	returnedSlicePadding [cacheLineSize - pointerSize]byte
 
 	buffer [stripedCapacity]unsafe.Pointer
 }

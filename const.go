@@ -24,6 +24,7 @@ import (
 const (
 	// cacheLineSize is used in paddings to prevent false sharing
 	cacheLineSize = unsafe.Sizeof(cpu.CacheLinePad{})
+	pointerSize   = unsafe.Sizeof(unsafe.Pointer(&struct{}{}))
 )
 
 // roundUpPowerOf2 is based on https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2.
