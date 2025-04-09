@@ -70,9 +70,18 @@ type cache struct {
 // Set method on a full cache will cause elements to be evicted according to the
 // S3-FIFO algorithm.
 func New(slotSize, slotCount int) Cache {
-	mCapacity := (slotCount * 90) / 100
-	sCapacity := slotCount - mCapacity
+	mCapacity, sCapacity := defaultEx(slotSize, slotCount)
 	return NewEx(slotSize, mCapacity, sCapacity)
+}
+
+const (
+	DefaultSmallQueuePercent = 10
+)
+
+func defaultEx(slotSize, slotCount int) (mCapacity, sCapacity int) {
+	mCapacity = (slotCount * (100 - DefaultSmallQueuePercent)) / 100
+	sCapacity = slotCount - mCapacity
+	return mCapacity, sCapacity
 }
 
 // NewEx creates a new otto.Cache with a fixed size of slotSize * (mCapacity + sCapacity).
@@ -357,14 +366,6 @@ func (c *cache) Entries() uint64 {
 func (c *cache) Serialize(w io.Writer) error {
 	e := gob.NewEncoder(w)
 
-	if err := e.Encode(c.slotSize); err != nil {
-		return err
-	}
-
-	if err := e.Encode(c.slotCount); err != nil {
-		return err
-	}
-
 	seed := *(*uint64)(unsafe.Pointer(&c.seed))
 	if err := e.Encode(seed); err != nil {
 		return err
@@ -379,16 +380,13 @@ func (c *cache) Serialize(w io.Writer) error {
 	return e.Encode(plain)
 }
 
-func Deserialize(r io.Reader) (Cache, error) {
-	d := gob.NewDecoder(r)
-	var chunkSize, chunkCount int
-	if err := d.Decode(&chunkSize); err != nil {
-		return nil, err
-	}
+func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
+	mCapacity, sCapacity := defaultEx(slotSize, slotCount)
+	return DeserializeEx(r, slotSize, mCapacity, sCapacity)
+}
 
-	if err := d.Decode(&chunkCount); err != nil {
-		return nil, err
-	}
+func DeserializeEx(r io.Reader, slotSize, mCapacity, sCapacity int) (Cache, error) {
+	d := gob.NewDecoder(r)
 
 	var rawSeed uint64
 	if err := d.Decode(&rawSeed); err != nil {
@@ -402,7 +400,7 @@ func Deserialize(r io.Reader) (Cache, error) {
 		return nil, err
 	}
 
-	c := New(chunkSize, chunkCount).(*cache)
+	c := NewEx(slotSize, mCapacity, sCapacity).(*cache)
 	c.seed = seed
 
 	for k, v := range plain {
@@ -429,13 +427,18 @@ func SaveToFile(c Cache, path string) error {
 	return file.Close()
 }
 
-func LoadFromFile(path string) (Cache, error) {
+func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
+	mCapacity, sCapacity := defaultEx(slotSize, slotCount)
+	return LoadFromFileEx(path, slotSize, mCapacity, sCapacity)
+}
+
+func LoadFromFileEx(path string, slotSize, mCapacity, sCapacity int) (Cache, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
-	cache, err := Deserialize(file)
+	cache, err := DeserializeEx(file, slotSize, mCapacity, sCapacity)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize to file: %w", err)
 	}
