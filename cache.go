@@ -83,8 +83,20 @@ func New(slotSize, slotCount int) Cache {
 // learn more about S3-FIFO visit https://s3fifo.com/
 func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 	slotCount := mCapacity + sCapacity
+
+	entryAlign := int(unsafe.Alignof(entry{}))
+
+	fullSlotSize := entrySize + slotSize
+	remainder := fullSlotSize % entryAlign
+	if remainder != 0 {
+		// We need to round up to ensure alignment.
+		fullSlotSize = fullSlotSize + (entryAlign - remainder)
+	}
+
+	slotSize = fullSlotSize - entrySize
+
 	return &cache{
-		alloc:     newAllocator(slotSize+entrySize, slotCount),
+		alloc:     newAllocator(fullSlotSize, slotCount),
 		m:         newEntryQueue(mCapacity),
 		s:         newEntryQueue(sCapacity),
 		g:         newGhost(mCapacity),

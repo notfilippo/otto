@@ -20,13 +20,13 @@ import (
 )
 
 type entry struct {
+	frequency atomic.Int32
+	access    atomic.Int32
+
 	hash uint64
 	next *byte
 
 	size int
-
-	frequency atomic.Int32
-	access    atomic.Int32
 }
 
 var entrySize = int(unsafe.Sizeof(entry{}))
