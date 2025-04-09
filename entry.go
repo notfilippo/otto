@@ -21,7 +21,12 @@ import (
 
 type entry struct {
 	frequency atomic.Int32
-	access    atomic.Int32
+	//lint:ignore U1000 prevents false sharing
+	fpad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
+
+	access atomic.Int32
+	//lint:ignore U1000 prevents false sharing
+	apad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
 
 	hash uint64
 	next *byte
