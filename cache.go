@@ -25,10 +25,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var (
-	Debug = false
-)
-
 type Cache interface {
 	// Set inserts an item in the cache. If the cache is full an element
 	// will be evicted.

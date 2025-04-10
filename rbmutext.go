@@ -30,8 +30,8 @@ const nslowdown = 7
 // pool for reader tokens
 var rtokenPool sync.Pool
 
-// RToken is a reader lock token.
-type RToken struct {
+// rToken is a reader lock token.
+type rToken struct {
 	slot uint32
 	//lint:ignore U1000 prevents false sharing
 	pad [cacheLineSize - 4]byte
@@ -84,7 +84,7 @@ func newRBMutex() *rbMutex {
 // TryRLock tries to lock m for reading without blocking.
 // When TryRLock succeeds, it returns true and a reader token.
 // In case of a failure, a false is returned.
-func (mu *rbMutex) TryRLock() (bool, *RToken) {
+func (mu *rbMutex) TryRLock() (bool, *rToken) {
 	if t := mu.fastRlock(); t != nil {
 		return true, t
 	}
@@ -103,7 +103,7 @@ func (mu *rbMutex) TryRLock() (bool, *RToken) {
 //
 // Should not be used for recursive read locking; a blocked Lock
 // call excludes new readers from acquiring the lock.
-func (mu *rbMutex) RLock() *RToken {
+func (mu *rbMutex) RLock() *rToken {
 	if t := mu.fastRlock(); t != nil {
 		return t
 	}
@@ -115,11 +115,11 @@ func (mu *rbMutex) RLock() *RToken {
 	return nil
 }
 
-func (mu *rbMutex) fastRlock() *RToken {
+func (mu *rbMutex) fastRlock() *rToken {
 	if atomic.LoadInt32(&mu.rbias) == 1 {
-		t, ok := rtokenPool.Get().(*RToken)
+		t, ok := rtokenPool.Get().(*rToken)
 		if !ok {
-			t = new(RToken)
+			t = new(rToken)
 			t.slot = runtime_fastrand()
 		}
 		// Try all available slots to distribute reader threads to slots.
@@ -148,7 +148,7 @@ func (mu *rbMutex) fastRlock() *RToken {
 // the RLock call must be provided. RUnlock does not affect other
 // simultaneous readers. A panic is raised if m is not locked for
 // reading on entry to RUnlock.
-func (mu *rbMutex) RUnlock(t *RToken) {
+func (mu *rbMutex) RUnlock(t *rToken) {
 	if t == nil {
 		mu.rw.RUnlock()
 		return
