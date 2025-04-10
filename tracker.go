@@ -112,13 +112,21 @@ func (s *TrackerCache) Clear() {
 	s.inner.Clear()
 }
 
-func (s *TrackerCache) Close() {
-	s.inner.Close()
+func (s *TrackerCache) Close() error {
 	close(s.done)
+	return s.inner.Close()
 }
 
 func (s *TrackerCache) Entries() uint64 {
 	return s.inner.Entries()
+}
+
+func (s *TrackerCache) Size() uint64 {
+	return s.inner.Size()
+}
+
+func (s *TrackerCache) Capacity() uint64 {
+	return s.inner.Capacity()
 }
 
 func (s *TrackerCache) Serialize(w io.Writer) error {
