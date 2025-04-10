@@ -112,9 +112,9 @@ func (s *TrackerCache) Clear() {
 	s.inner.Clear()
 }
 
-func (s *TrackerCache) Close() {
-	s.inner.Close()
+func (s *TrackerCache) Close() error {
 	close(s.done)
+	return s.inner.Close()
 }
 
 func (s *TrackerCache) Entries() uint64 {

@@ -49,7 +49,7 @@ func TestHitRatio(t *testing.T) {
 		t.Log("hit ratio test started. the test can take a lot of time to run, use `go test --short` to skip it")
 	}
 
-	sizes := []int{100, 500, 1000, 5000}
+	shards := []int{100, 500, 1000, 5000}
 	concurrency := []int{1, 2, 4, 8, 16, 32}
 
 	keySpace := uint64(10000)
@@ -65,13 +65,13 @@ func TestHitRatio(t *testing.T) {
 	// Ops per worker.
 	ops := 500
 
-	for _, size := range sizes {
-		t.Run(fmt.Sprintf("size-%d", size), func(t *testing.T) {
+	for _, shards := range shards {
+		t.Run(fmt.Sprintf("size-%d", shards), func(t *testing.T) {
 			for _, concurrency := range concurrency {
 				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := otto.New(32, size)
+							c := otto.New(shards, 1<<12)
 							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 

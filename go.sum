@@ -1,5 +1,5 @@
-github.com/axiomhq/hyperloglog v0.2.3 h1:2ZGwz3FGcx77e9/aNjqJijsGhH6RZOlglzxnDpVBCQY=
-github.com/axiomhq/hyperloglog v0.2.3/go.mod h1:DLUK9yIzpU5B6YFLjxTIcbHu1g4Y1WQb1m5RH3radaM=
+github.com/axiomhq/hyperloglog v0.2.5 h1:Hefy3i8nAs8zAI/tDp+wE7N+Ltr8JnwiW3875pvl0N8=
+github.com/axiomhq/hyperloglog v0.2.5/go.mod h1:DLUK9yIzpU5B6YFLjxTIcbHu1g4Y1WQb1m5RH3radaM=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dgryski/go-metro v0.0.0-20180109044635-280f6062b5bc h1:8WFBn63wegobsYAX0YjD+8suexZDga5CctH4CCTx2+8=

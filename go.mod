@@ -17,7 +17,7 @@ module github.com/notfilippo/otto
 go 1.23.6
 
 require (
-	github.com/axiomhq/hyperloglog v0.2.3
+	github.com/axiomhq/hyperloglog v0.2.5
 	golang.org/x/sys v0.30.0
 )
 
