@@ -6,7 +6,7 @@ import (
 )
 
 func TestBasicBehaviour(t *testing.T) {
-	c := New(100, 1<<12)
+	c := New(1<<12, 100)
 	defer c.Close()
 
 	c.Set("key1", []byte("value1"))
@@ -40,9 +40,9 @@ func assertNotInCache(t *testing.T, c Cache, key string) {
 	}
 }
 
-func TestCacheEvistion(t *testing.T) {
+func TestCacheEviction(t *testing.T) {
 	size := 100
-	c := New(1, 100)
+	c := New(100, 1)
 	defer c.Close()
 
 	// Lets' fill the cache.
@@ -81,4 +81,47 @@ func TestCacheEvistion(t *testing.T) {
 	assertNotInCache(t, c, "key5")
 	assertNotInCache(t, c, "key4")
 	assertInCache(t, c, "key6")
+}
+
+func TestSerialize(t *testing.T) {
+	c := New(1<<12, 100)
+	defer c.Close()
+
+	c.Set("key1", []byte("value1"))
+	c.Set("key2", []byte("value2"))
+	c.Set("key3", []byte("value3"))
+
+	var buf bytes.Buffer
+	if err := c.Serialize(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	c2, err := Deserialize(&buf, 1<<12, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+
+	assertInCache(t, c2, "key1")
+	assertInCache(t, c2, "key2")
+	assertInCache(t, c2, "key3")
+
+	// Test serializing empty cache
+	c3 := New(1<<12, 100)
+	defer c3.Close()
+
+	buf.Reset()
+	if err := c3.Serialize(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	c4, err := Deserialize(&buf, 1<<12, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c4.Close()
+
+	if c4.Entries() != 0 {
+		t.Errorf("expected empty cache, got %d entries", c4.Entries())
+	}
 }

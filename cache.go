@@ -15,9 +15,11 @@
 package otto
 
 import (
+	"encoding/gob"
 	"fmt"
 	"hash/maphash"
 	"io"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -57,8 +59,8 @@ type cache struct {
 	shards []shard
 }
 
-func New(shardCount, shardSize int) Cache {
-	arenaSize := shardCount * shardSize
+func New(shardSize, shardCount int) Cache {
+	arenaSize := shardSize * shardCount
 	arena, err := unix.Mmap(-1, 0, arenaSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
 	if err != nil {
 		panic(fmt.Errorf("cannot allocate %d shards of %d size = %d bytes via mmap: %w", shardCount, shardSize, arenaSize, err))
@@ -84,6 +86,10 @@ func (c *cache) Set(key string, val []byte) {
 	}
 
 	hash := maphash.String(c.seed, key)
+	c.set(hash, val)
+}
+
+func (c *cache) set(hash uint64, val []byte) {
 	index := int(hash % uint64(len(c.shards)))
 	shard := &c.shards[index]
 
@@ -133,6 +139,10 @@ func (c *cache) Set(key string, val []byte) {
 
 func (c *cache) Get(key string, buf []byte) []byte {
 	hash := maphash.String(c.seed, key)
+	return c.get(hash, buf)
+}
+
+func (c *cache) get(hash uint64, buf []byte) []byte {
 	shard := &c.shards[int(hash%uint64(len(c.shards)))]
 
 	tok := shard.mu.RLock()
@@ -198,7 +208,80 @@ func (c *cache) Close() error {
 }
 
 func (c *cache) Serialize(w io.Writer) error {
-	panic("unimplemented")
+	e := gob.NewEncoder(w)
+
+	seed := *(*uint64)(unsafe.Pointer(&c.seed))
+	if err := e.Encode(seed); err != nil {
+		return err
+	}
+
+	plain := make(map[uint64][]byte)
+	for i := range c.shards {
+		shard := &c.shards[i]
+		tok := shard.mu.RLock()
+		for k := range shard.entries {
+			plain[k] = c.get(k, nil)
+		}
+		shard.mu.RUnlock(tok)
+	}
+
+	return e.Encode(plain)
+}
+
+func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
+	d := gob.NewDecoder(r)
+
+	var rawSeed uint64
+	if err := d.Decode(&rawSeed); err != nil {
+		return nil, err
+	}
+
+	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
+
+	plain := make(map[uint64][]byte)
+	if err := d.Decode(&plain); err != nil {
+		return nil, err
+	}
+
+	c := New(slotSize, slotCount).(*cache)
+	c.seed = seed
+
+	for k, v := range plain {
+		if len(v) == 0 {
+			continue
+		}
+
+		c.set(k, v)
+	}
+
+	return c, nil
+}
+
+func SaveToFile(c Cache, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+
+	if err := c.Serialize(file); err != nil {
+		return fmt.Errorf("failed to serialize to file: %w", err)
+	}
+
+	return file.Close()
+}
+
+func LoadFromFileEx(path string, slotSize, slotCount int) (Cache, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+
+	cache, err := Deserialize(file, slotSize, slotCount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize to file: %w", err)
+	}
+
+	return cache, file.Close()
 }
 
 type entry struct {
