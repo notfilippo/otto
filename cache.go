@@ -32,35 +32,53 @@ var (
 
 type Cache interface {
 	// Set inserts an item in the cache. If the cache is full an element
-	// will be evicted according to the S3-FIFO algorithm.
+	// will be evicted.
 	//
 	// NOTE: updates are not supported.
 	Set(key string, val []byte)
 
 	// Get retrieves - if available - an item from the cache. If the item
-	// does not exist this method will return nil.
+	// does not exist it will return nil.
 	Get(key string, buf []byte) []byte
 
-	// Clear the cache, removing every entry without freeing the memory.
+	// Clear clears the cache, removing every entry without freeing the memory.
 	Clear()
 
-	// Clear the cache, removing every entry and freeing the memory.
-	Close()
+	// Close clears the cache, removing every entry and freeing the memory.
+	Close() error
 
-	// Returns the number of entries currently stored in the cache.
+	// Entries returns the number of entries currently stored in the cache.
 	Entries() uint64
 
+	// Size returns the sum of the sizes of all the entries currently
+	// stored in the cache.
+	Size() uint64
+
+	// Capacity returns the theoretical capacity of the cache.
+	Capacity() uint64
+
+	// Serialize write the cache to a writer. The cache can then be
+	// reinstantiated using the otto.Deserialize function.
 	Serialize(w io.Writer) error
 }
 
 type cache struct {
+	closed atomic.Bool
+	//lint:ignore U1000 prevents false sharing
+	cpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+
+	entries atomic.Uint64
+	//lint:ignore U1000 prevents false sharing
+	epad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
+
+	memoryUsed atomic.Int64
+	//lint:ignore U1000 prevents false sharing
+	mpad [cacheLineSize - unsafe.Sizeof(atomic.Int64{})]byte
+
 	alloc   *allocator
 	m, s    *entryQueue
 	g       *ghost
 	hashmap *hmap
-
-	entries atomic.Uint64
-	closed  atomic.Bool
 
 	seed                maphash.Seed
 	slotSize, slotCount int
@@ -70,7 +88,7 @@ type cache struct {
 // Set method on a full cache will cause elements to be evicted according to the
 // S3-FIFO algorithm.
 func New(slotSize, slotCount int) Cache {
-	mCapacity, sCapacity := defaultEx(slotSize, slotCount)
+	mCapacity, sCapacity := defaultEx(slotCount)
 	return NewEx(slotSize, mCapacity, sCapacity)
 }
 
@@ -78,7 +96,7 @@ const (
 	DefaultSmallQueuePercent = 10
 )
 
-func defaultEx(slotSize, slotCount int) (mCapacity, sCapacity int) {
+func defaultEx(slotCount int) (mCapacity, sCapacity int) {
 	mCapacity = (slotCount * (100 - DefaultSmallQueuePercent)) / 100
 	sCapacity = slotCount - mCapacity
 	return mCapacity, sCapacity
@@ -171,6 +189,8 @@ func (c *cache) set(hash uint64, val []byte) {
 	}) {
 		c.evict()
 	}
+
+	c.memoryUsed.Add(int64(size))
 
 	c.hashmap.Store(hash, first)
 	c.entries.Add(1)
@@ -294,6 +314,7 @@ func (c *cache) evictEntry(e *entry) {
 	}
 
 	c.entries.Add(^uint64(0))
+	c.memoryUsed.Add(-int64(e.size))
 
 	if e.size < 1 {
 		panic("otto: invariant violated: entry with size zero")
@@ -354,13 +375,21 @@ func (c *cache) Clear() {
 	c.entries.Store(0)
 }
 
-func (c *cache) Close() {
+func (c *cache) Close() error {
 	c.closed.Store(true)
-	c.alloc.Close()
+	return c.alloc.Close()
 }
 
 func (c *cache) Entries() uint64 {
 	return c.entries.Load()
+}
+
+func (c *cache) Size() uint64 {
+	return uint64(c.memoryUsed.Load())
+}
+
+func (c *cache) Capacity() uint64 {
+	return uint64(c.slotCount * c.slotSize)
 }
 
 func (c *cache) Serialize(w io.Writer) error {
@@ -381,7 +410,7 @@ func (c *cache) Serialize(w io.Writer) error {
 }
 
 func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
-	mCapacity, sCapacity := defaultEx(slotSize, slotCount)
+	mCapacity, sCapacity := defaultEx(slotCount)
 	return DeserializeEx(r, slotSize, mCapacity, sCapacity)
 }
 
@@ -428,7 +457,7 @@ func SaveToFile(c Cache, path string) error {
 }
 
 func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
-	mCapacity, sCapacity := defaultEx(slotSize, slotCount)
+	mCapacity, sCapacity := defaultEx(slotCount)
 	return LoadFromFileEx(path, slotSize, mCapacity, sCapacity)
 }
 
