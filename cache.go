@@ -266,7 +266,7 @@ func SaveToFile(c Cache, path string) error {
 	return file.Close()
 }
 
-func LoadFromFileEx(path string, slotSize, slotCount int) (Cache, error) {
+func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
