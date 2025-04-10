@@ -306,7 +306,7 @@ func TestCacheSerialization(t *testing.T) {
 	}
 
 	// Deserialize into a new cache
-	newCache, err := otto.Deserialize(&buf)
+	newCache, err := otto.Deserialize(&buf, slotSize, slotCount)
 	if err != nil {
 		t.Fatalf("Failed to deserialize cache: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestCacheFileStorage(t *testing.T) {
 	}
 
 	// Load from file
-	loadedCache, err := otto.LoadFromFile(filePath)
+	loadedCache, err := otto.LoadFromFile(filePath, slotSize, slotCount)
 	if err != nil {
 		t.Fatalf("Failed to load cache from file: %v", err)
 	}
