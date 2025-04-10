@@ -62,6 +62,24 @@ type Cache interface {
 	Serialize(w io.Writer) error
 }
 
+type InternalStatsCache interface {
+	Cache
+
+	// MQueueEntries returns the number of entries in the M-queue.
+	MQueueEntries() uint64
+
+	// MQueueCapacity returns the capacity of the M-queue.
+	MQueueCapacity() uint64
+
+	// SQueueEntries returns the number of entries in the S-queue.
+	SQueueEntries() uint64
+
+	// SQueueCapacity returns the capacity of the S-queue.
+	SQueueCapacity() uint64
+}
+
+var _ (InternalStatsCache) = (*cache)(nil)
+
 type cache struct {
 	closed atomic.Bool
 	//lint:ignore U1000 prevents false sharing
@@ -390,6 +408,22 @@ func (c *cache) Size() uint64 {
 
 func (c *cache) Capacity() uint64 {
 	return uint64(c.slotCount * c.slotSize)
+}
+
+func (c *cache) MQueueCapacity() uint64 {
+	return c.m.fifo.cap
+}
+
+func (c *cache) MQueueEntries() uint64 {
+	return uint64(c.m.size.Load())
+}
+
+func (c *cache) SQueueCapacity() uint64 {
+	return c.s.fifo.cap
+}
+
+func (c *cache) SQueueEntries() uint64 {
+	return uint64(c.s.size.Load())
 }
 
 func (c *cache) Serialize(w io.Writer) error {

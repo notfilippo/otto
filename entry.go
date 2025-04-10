@@ -37,8 +37,8 @@ type entry struct {
 var entrySize = int(unsafe.Sizeof(entry{}))
 
 type entryQueue struct {
-	fifo *queue[*entry]
 	size atomic.Int64
+	fifo *queue[*entry]
 }
 
 func newEntryQueue(cap int) *entryQueue {
