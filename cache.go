@@ -26,10 +26,6 @@ import (
 	"unsafe"
 )
 
-var (
-	Debug = false
-)
-
 type Cache interface {
 	// Set inserts an item in the cache. If the cache is full an element
 	// will be evicted.
@@ -131,19 +127,19 @@ func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 
 	entryAlign := int(unsafe.Alignof(entry{}))
 
-	fullSlotSize := entrySize + slotSize
+	fullSlotSize := entryStructSize + slotSize
 	remainder := fullSlotSize % entryAlign
 	if remainder != 0 {
 		// We need to round up to ensure alignment.
 		fullSlotSize = fullSlotSize + (entryAlign - remainder)
 	}
 
-	slotSize = fullSlotSize - entrySize
+	slotSize = fullSlotSize - entryStructSize
 
 	return &cache{
 		alloc:     newAllocator(fullSlotSize, slotCount),
-		m:         newEntryQueue(mCapacity),
-		s:         newEntryQueue(sCapacity),
+		m:         newEntryQueue(mCapacity, slotSize),
+		s:         newEntryQueue(sCapacity, slotSize),
 		g:         newGhost(mCapacity),
 		hashmap:   newMap(withPresize(slotCount)),
 		seed:      maphash.MakeSeed(),
@@ -159,10 +155,6 @@ func (c *cache) Set(key string, val []byte) {
 
 	hash := maphash.String(c.seed, key)
 
-	if Debug {
-		fmt.Printf("adding key %s string (hash %d) size = %d cost = %d\n", key, hash, len(val), c.cost(len(val)))
-	}
-
 	c.set(hash, val)
 }
 
@@ -173,10 +165,10 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 
 	size := len(val)
-	cost := c.cost(size)
+	slots := cost(c.slotSize, size)
 
-	if cost > c.slotCount {
-		panic(fmt.Sprintf("otto: no more memory to store key %d size = %d cost = %d", hash, size, cost))
+	if slots > c.slotCount {
+		panic(fmt.Sprintf("otto: entry %d cannot fit in cache size = %d slots = %d", hash, size, slots))
 	}
 
 	var (
@@ -185,7 +177,7 @@ func (c *cache) set(hash uint64, val []byte) {
 		i     int
 	)
 
-	for !c.alloc.Alloc(cost, func(b *byte) {
+	for !c.alloc.Alloc(slots, func(b *byte) {
 		e := (*entry)(unsafe.Pointer(b))
 		if prev != nil {
 			prev.next = b
@@ -199,8 +191,8 @@ func (c *cache) set(hash uint64, val []byte) {
 		e.frequency.Store(0)
 		e.access.Store(0)
 
-		buf := unsafe.Slice(b, entrySize+c.slotSize)
-		copy(buf[entrySize:], val[i*c.slotSize:])
+		buf := unsafe.Slice(b, entryStructSize+c.slotSize)
+		copy(buf[entryStructSize:], val[i*c.slotSize:])
 
 		prev = e
 		i += 1
@@ -230,10 +222,6 @@ func (c *cache) Get(key string, buf []byte) []byte {
 	}
 
 	hash := maphash.String(c.seed, key)
-
-	if Debug {
-		fmt.Printf("getting key %s string (hash %d)\n", key, hash)
-	}
 
 	return c.get(hash, buf)
 }
@@ -323,10 +311,6 @@ func (c *cache) evictM() {
 }
 
 func (c *cache) evictEntry(e *entry) {
-	if Debug {
-		fmt.Printf("evicting key hash %d size = %d cost = %d\n", e.hash, e.size, c.cost(e.size))
-	}
-
 	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || prev != e {
 		panic("otto: invariant violated: entry already deleted")
 	}
@@ -339,7 +323,7 @@ func (c *cache) evictEntry(e *entry) {
 	}
 
 	chunk := (*byte)(unsafe.Pointer(e))
-	for range c.cost(e.size) {
+	for range cost(c.slotSize, e.size) {
 		e := (*entry)(unsafe.Pointer(chunk))
 		next := e.next
 		for !c.alloc.Free(chunk) {
@@ -347,10 +331,6 @@ func (c *cache) evictEntry(e *entry) {
 		}
 		chunk = next
 	}
-}
-
-func (c *cache) cost(size int) int {
-	return (size + c.slotSize - 1) / c.slotSize
 }
 
 func (c *cache) read(e *entry, buf []byte) []byte {
@@ -361,7 +341,7 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 		buf = buf[:size]
 	}
 
-	slots := c.cost(size)
+	slots := cost(c.slotSize, size)
 
 	slot := (*byte)(unsafe.Pointer(e))
 	for i := range slots {
@@ -371,10 +351,10 @@ func (c *cache) read(e *entry, buf []byte) []byte {
 			return nil
 		}
 
-		source := unsafe.Slice(slot, c.slotSize+entrySize)
+		source := unsafe.Slice(slot, c.slotSize+entryStructSize)
 
 		end := min((i+1)*c.slotSize, size)
-		copy(buf[i*c.slotSize:end], source[entrySize:])
+		copy(buf[i*c.slotSize:end], source[entryStructSize:])
 
 		slot = e.next
 	}
@@ -387,8 +367,8 @@ func (c *cache) Clear() {
 	sCap := c.slotCount - mCap
 	c.hashmap = newMap(withPresize(c.slotCount))
 	c.alloc.Clear()
-	c.m = newEntryQueue(mCap)
-	c.s = newEntryQueue(sCap)
+	c.m = newEntryQueue(mCap, c.slotSize)
+	c.s = newEntryQueue(sCap, c.slotSize)
 	c.g = newGhost(mCap)
 	c.entries.Store(0)
 }
@@ -415,7 +395,7 @@ func (c *cache) MQueueCapacity() uint64 {
 }
 
 func (c *cache) MQueueEntries() uint64 {
-	return uint64(c.m.size.Load())
+	return uint64(c.m.cost.Load())
 }
 
 func (c *cache) SQueueCapacity() uint64 {
@@ -423,7 +403,7 @@ func (c *cache) SQueueCapacity() uint64 {
 }
 
 func (c *cache) SQueueEntries() uint64 {
-	return uint64(c.s.size.Load())
+	return uint64(c.s.cost.Load())
 }
 
 func (c *cache) Serialize(w io.Writer) error {

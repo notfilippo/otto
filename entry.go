@@ -34,23 +34,33 @@ type entry struct {
 	size int
 }
 
-var entrySize = int(unsafe.Sizeof(entry{}))
+var entryStructSize = int(unsafe.Sizeof(entry{}))
 
-type entryQueue struct {
-	size atomic.Int64
-	fifo *queue[*entry]
+func cost(slotSize, entrySize int) int {
+	return (entrySize + slotSize - 1) / slotSize
 }
 
-func newEntryQueue(cap int) *entryQueue {
+type entryQueue struct {
+	cost atomic.Int64
+	//lint:ignore U1000 prevents false sharing
+	cpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+
+	fifo *queue[*entry]
+
+	slotSize int
+}
+
+func newEntryQueue(cap int, slotSize int) *entryQueue {
 	return &entryQueue{
-		fifo: newQueue[*entry](cap),
+		fifo:     newQueue[*entry](cap),
+		slotSize: slotSize,
 	}
 }
 
 func (q *entryQueue) Push(e *entry) bool {
 	size := e.size
 	if q.fifo.TryEnqueue(e) {
-		q.size.Add(int64(size))
+		q.cost.Add(int64(cost(q.slotSize, size)))
 		return true
 	}
 
@@ -59,12 +69,12 @@ func (q *entryQueue) Push(e *entry) bool {
 
 func (q *entryQueue) Pop() (*entry, bool) {
 	if e, ok := q.fifo.TryDequeue(); ok {
-		q.size.Add(-int64(e.size))
+		q.cost.Add(-int64(cost(q.slotSize, e.size)))
 		return e, true
 	}
 	return nil, false
 }
 
 func (q *entryQueue) IsFull() bool {
-	return q.size.Load() >= int64(q.fifo.cap)
+	return q.cost.Load() >= int64(q.fifo.cap)
 }
