@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -94,6 +95,8 @@ type cache struct {
 	g       *ghost
 	hashmap *hmap
 
+	entriesPool sync.Pool
+
 	seed                maphash.Seed
 	slotSize, slotCount int
 }
@@ -107,6 +110,10 @@ func New(slotSize, slotCount int) Cache {
 }
 
 const (
+	// DefaultSmallQueuePercent is the default percentage of the cache capacity
+	// allocated to the small queue (S-queue) in the S3-FIFO algorithm.
+	// The remaining percentage (100 - DefaultSmallQueuePercent) is allocated
+	// to the main queue (M-queue).
 	DefaultSmallQueuePercent = 10
 )
 
@@ -125,26 +132,27 @@ func defaultEx(slotCount int) (mCapacity, sCapacity int) {
 func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 	slotCount := mCapacity + sCapacity
 
-	entryAlign := int(unsafe.Alignof(entry{}))
+	nextHeaderAlign := int(unsafe.Alignof(entry{}))
 
-	fullSlotSize := entryStructSize + slotSize
-	remainder := fullSlotSize % entryAlign
+	fullSlotSize := nextHeaderSize + slotSize
+	remainder := fullSlotSize % nextHeaderAlign
 	if remainder != 0 {
 		// We need to round up to ensure alignment.
-		fullSlotSize = fullSlotSize + (entryAlign - remainder)
+		fullSlotSize = fullSlotSize + (nextHeaderAlign - remainder)
 	}
 
-	slotSize = fullSlotSize - entryStructSize
+	slotSize = fullSlotSize - nextHeaderSize
 
 	return &cache{
-		alloc:     newAllocator(fullSlotSize, slotCount),
-		m:         newEntryQueue(mCapacity, slotSize),
-		s:         newEntryQueue(sCapacity, slotSize),
-		g:         newGhost(mCapacity),
-		hashmap:   newMap(withPresize(slotCount)),
-		seed:      maphash.MakeSeed(),
-		slotSize:  slotSize,
-		slotCount: slotCount,
+		alloc:       newAllocator(slotSize, slotCount),
+		m:           newEntryQueue(mCapacity, slotSize),
+		s:           newEntryQueue(sCapacity, slotSize),
+		g:           newGhost(mCapacity),
+		hashmap:     newMap(withPresize(slotCount)),
+		entriesPool: sync.Pool{New: func() any { return new(entry) }},
+		seed:        maphash.MakeSeed(),
+		slotSize:    slotSize,
+		slotCount:   slotCount,
 	}
 }
 
@@ -165,36 +173,35 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 
 	size := len(val)
-	slots := cost(c.slotSize, size)
+	slots := cost(size, c.slotSize)
 
 	if slots > c.slotCount {
 		panic(fmt.Sprintf("otto: entry %d cannot fit in cache size = %d slots = %d", hash, size, slots))
 	}
 
+	e := c.entriesPool.Get().(*entry)
+	e.frequency.Store(0)
+	e.access.Store(0)
+	e.hash = hash
+	e.size = size
+	e.first = nil
+
 	var (
-		prev  *entry
-		first *entry
-		i     int
+		prev *nextHeader
+		i    int
 	)
 
 	for !c.alloc.Alloc(slots, func(b *byte) {
-		e := (*entry)(unsafe.Pointer(b))
 		if prev != nil {
 			prev.next = b
 		} else {
-			first = e
+			e.first = b
 		}
 
-		e.hash = hash
-		e.next = nil
-		e.size = size
-		e.frequency.Store(0)
-		e.access.Store(0)
+		buf := unsafe.Slice(b, nextHeaderSize+c.slotSize)
+		copy(buf[nextHeaderSize:], val[i*c.slotSize:])
 
-		buf := unsafe.Slice(b, entryStructSize+c.slotSize)
-		copy(buf[entryStructSize:], val[i*c.slotSize:])
-
-		prev = e
+		prev = (*nextHeader)(unsafe.Pointer(b))
 		i += 1
 	}) {
 		c.evict()
@@ -202,31 +209,31 @@ func (c *cache) set(hash uint64, val []byte) {
 
 	c.memoryUsed.Add(int64(size))
 
-	c.hashmap.Store(hash, first)
+	c.hashmap.Store(hash, e)
 	c.entries.Add(1)
 
 	if c.g.In(hash) {
-		for !c.m.Push(first) {
+		for !c.m.Push(e) {
 			c.evictM()
 		}
 	} else {
-		for !c.s.Push(first) {
+		for !c.s.Push(e) {
 			c.evictS()
 		}
 	}
 }
 
-func (c *cache) Get(key string, buf []byte) []byte {
+func (c *cache) Get(key string, dst []byte) []byte {
 	if c.closed.Load() {
 		return nil
 	}
 
 	hash := maphash.String(c.seed, key)
 
-	return c.get(hash, buf)
+	return c.get(hash, dst)
 }
 
-func (c *cache) get(hash uint64, buf []byte) []byte {
+func (c *cache) get(hash uint64, dst []byte) []byte {
 	e, ok := c.hashmap.Load(hash)
 	if !ok || e == nil {
 		return nil
@@ -234,15 +241,18 @@ func (c *cache) get(hash uint64, buf []byte) []byte {
 
 	for {
 		access := e.access.Load()
+		// Ensure entry is not marked for eviction.
 		if access < 0 {
 			return nil
 		}
 
+		// Increment access count to signal we are reading.
 		if e.access.CompareAndSwap(access, access+1) {
 			break
 		}
 	}
 
+	// Increment frequency (capped at 3) per S3-FIFO.
 	for {
 		freq := e.frequency.Load()
 
@@ -251,11 +261,12 @@ func (c *cache) get(hash uint64, buf []byte) []byte {
 		}
 	}
 
-	buf = c.read(e, buf)
+	dst = c.read(e, dst)
 
+	// Decrement access count as we are done reading.
 	e.access.Add(-1)
 
-	return buf
+	return dst
 }
 
 func (c *cache) evict() {
@@ -269,6 +280,7 @@ func (c *cache) evict() {
 func (c *cache) evictS() {
 	t, ok := c.s.Pop()
 	for ok && t != nil {
+		// Atomically check if frequency <= 1 and mark for eviction if no readers (access == 0).
 		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.g.Add(t.hash)
 			c.evictEntry(t)
@@ -289,11 +301,13 @@ func (c *cache) evictS() {
 func (c *cache) evictM() {
 	t, ok := c.m.Pop()
 	for ok && t != nil {
+		// Atomically check if frequency <= 0 and mark for eviction if no readers (access == 0).
 		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.evictEntry(t)
 			return
 		}
 
+		// Entry not evicted, decrement frequency (min 0) per S3-FIFO.
 		for {
 			freq := t.frequency.Load()
 
@@ -322,44 +336,47 @@ func (c *cache) evictEntry(e *entry) {
 		panic("otto: invariant violated: entry with size zero")
 	}
 
-	chunk := (*byte)(unsafe.Pointer(e))
-	for range cost(c.slotSize, e.size) {
-		e := (*entry)(unsafe.Pointer(chunk))
-		next := e.next
-		for !c.alloc.Free(chunk) {
+	slot := e.first
+	c.entriesPool.Put(e)
+
+	for range cost(e.size, c.slotSize) {
+		header := (*nextHeader)(unsafe.Pointer(slot))
+		next := header.next
+		for !c.alloc.Free(slot) {
 			runtime.Gosched()
 		}
-		chunk = next
+		slot = next
 	}
 }
 
-func (c *cache) read(e *entry, buf []byte) []byte {
+func (c *cache) read(e *entry, dst []byte) []byte {
 	size := e.size
-	if cap(buf) < size {
-		buf = make([]byte, size)
+	if cap(dst) < size {
+		dst = make([]byte, size)
 	} else {
-		buf = buf[:size]
+		dst = dst[:size]
 	}
 
-	slots := cost(c.slotSize, size)
+	slots := cost(size, c.slotSize)
 
-	slot := (*byte)(unsafe.Pointer(e))
+	slot := e.first
 	for i := range slots {
-		e := (*entry)(unsafe.Pointer(slot))
 		if slot == nil {
 			// Corruption happened, returning nil
 			return nil
 		}
 
-		source := unsafe.Slice(slot, c.slotSize+entryStructSize)
+		header := (*nextHeader)(unsafe.Pointer(slot))
+
+		source := unsafe.Slice(slot, c.slotSize+nextHeaderSize)
 
 		end := min((i+1)*c.slotSize, size)
-		copy(buf[i*c.slotSize:end], source[entryStructSize:])
+		copy(dst[i*c.slotSize:end], source[nextHeaderSize:])
 
-		slot = e.next
+		slot = header.next
 	}
 
-	return buf
+	return dst
 }
 
 func (c *cache) Clear() {

@@ -20,23 +20,33 @@ import (
 )
 
 type entry struct {
+	// frequency tracks recent usage for the S3-FIFO admission/eviction policy.
+	// Increased on Get, decreased/checked during eviction.
 	frequency atomic.Int32
 	//lint:ignore U1000 prevents false sharing
 	fpad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
 
+	// access is a counter tracking active Get operations to prevent eviction
+	// during reads. It's incremented by Get and checked/marked by evict.
 	access atomic.Int32
 	//lint:ignore U1000 prevents false sharing
 	apad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
 
 	hash uint64
-	next *byte
-
 	size int
+
+	first *byte
 }
 
-var entryStructSize = int(unsafe.Sizeof(entry{}))
+type nextHeader struct {
+	next *byte
+}
 
-func cost(slotSize, entrySize int) int {
+var (
+	nextHeaderSize = int(unsafe.Sizeof(nextHeader{}))
+)
+
+func cost(entrySize, slotSize int) int {
 	return (entrySize + slotSize - 1) / slotSize
 }
 
@@ -60,7 +70,7 @@ func newEntryQueue(cap int, slotSize int) *entryQueue {
 func (q *entryQueue) Push(e *entry) bool {
 	size := e.size
 	if q.fifo.TryEnqueue(e) {
-		q.cost.Add(int64(cost(q.slotSize, size)))
+		q.cost.Add(int64(cost(size, q.slotSize)))
 		return true
 	}
 
@@ -69,7 +79,7 @@ func (q *entryQueue) Push(e *entry) bool {
 
 func (q *entryQueue) Pop() (*entry, bool) {
 	if e, ok := q.fifo.TryDequeue(); ok {
-		q.cost.Add(-int64(cost(q.slotSize, e.size)))
+		q.cost.Add(-int64(cost(e.size, q.slotSize)))
 		return e, true
 	}
 	return nil, false
