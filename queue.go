@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified version of https://github.com/puzpuzpuz/xsync/blob/main/mpmcqueue.go
+// Modified version of https://github.com/puzpuzpuz/xsync/blob/main/mpmcqueueof.go
 // Licensed under Apache-2.0 Copyright 2025 Andrei Pechkurov
 
 package otto
@@ -32,12 +32,12 @@ import (
 // https://github.com/rigtorp/MPMCQueue
 type queue[T any] struct {
 	cap  uint64
-	head uint64
+	head atomic.Uint64
 	//lint:ignore U1000 prevents false sharing
-	hpad [cacheLineSize - 8]byte
-	tail uint64
+	hpad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
+	tail atomic.Uint64
 	//lint:ignore U1000 prevents false sharing
-	tpad  [cacheLineSize - 8]byte
+	tpad  [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
 	slots []slotPadded[T]
 }
 
@@ -52,7 +52,7 @@ type slotPadded[T any] struct {
 }
 
 type slot[T any] struct {
-	turn uint64
+	turn atomic.Uint64
 	item T
 }
 
@@ -72,13 +72,13 @@ func newQueue[T any](capacity int) *queue[T] {
 // and returns immediately. The result indicates that the queue isn't
 // full and the item was inserted.
 func (q *queue[T]) TryEnqueue(item T) bool {
-	head := atomic.LoadUint64(&q.head)
+	head := q.head.Load()
 	slot := &q.slots[q.idx(head)]
 	turn := q.turn(head) * 2
-	if atomic.LoadUint64(&slot.turn) == turn {
-		if atomic.CompareAndSwapUint64(&q.head, head, head+1) {
+	if slot.turn.Load() == turn {
+		if q.head.CompareAndSwap(head, head+1) {
 			slot.item = item
-			atomic.StoreUint64(&slot.turn, turn+1)
+			slot.turn.Store(turn + 1)
 			return true
 		}
 	}
@@ -89,16 +89,16 @@ func (q *queue[T]) TryEnqueue(item T) bool {
 // queue. Does not block and returns immediately. The ok result
 // indicates that the queue isn't empty and an item was retrieved.
 func (q *queue[T]) TryDequeue() (item T, ok bool) {
-	tail := atomic.LoadUint64(&q.tail)
+	tail := q.tail.Load()
 	slot := &q.slots[q.idx(tail)]
 	turn := q.turn(tail)*2 + 1
-	if atomic.LoadUint64(&slot.turn) == turn {
-		if atomic.CompareAndSwapUint64(&q.tail, tail, tail+1) {
+	if slot.turn.Load() == turn {
+		if q.tail.CompareAndSwap(tail, tail+1) {
 			item = slot.item
 			ok = true
 			var zero T
 			slot.item = zero
-			atomic.StoreUint64(&slot.turn, turn+1)
+			slot.turn.Store(turn + 1)
 			return
 		}
 	}
@@ -114,20 +114,20 @@ func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
 	}
 
 	// Load the tail index
-	tail := atomic.LoadUint64(&q.tail)
+	tail := q.tail.Load()
 
 	// Check if all n slots are ready for dequeuing
 	for i := range n {
 		idx := q.idx(tail + uint64(i))
 		slot := &q.slots[idx]
 		turn := q.turn(tail+uint64(i))*2 + 1
-		if atomic.LoadUint64(&slot.turn) != turn {
+		if slot.turn.Load() != turn {
 			return false // Not all slots are ready
 		}
 	}
 
 	// Try to atomically increment the tail index by n
-	if !atomic.CompareAndSwapUint64(&q.tail, tail, tail+uint64(n)) {
+	if !q.tail.CompareAndSwap(tail, tail+uint64(n)) {
 		return false // Another consumer modified tail
 	}
 
@@ -140,7 +140,7 @@ func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
 		yield(slot.item)
 		var zero T
 		slot.item = zero
-		atomic.StoreUint64(&slot.turn, turn+1)
+		slot.turn.Store(turn + 1)
 	}
 
 	return true
