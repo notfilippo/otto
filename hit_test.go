@@ -101,28 +101,16 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 	var (
 		wg           sync.WaitGroup
 		hits, misses atomic.Uint64
-		completedOps atomic.Uint64
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		totalOps := ops * concurrency
-		for range time.Tick(500 * time.Millisecond) {
-			fmt.Printf("\r%d/%d", completedOps.Load(), totalOps)
-			if completedOps.Load() >= uint64(totalOps) {
-				fmt.Print("\r")
-				break
-			}
-		}
-	}()
+	done := make(chan struct{})
 
-	for workerID := range concurrency {
+	for id := range concurrency {
 		wg.Add(1)
-		go func(workerID int) {
+		go func(id int) {
 			defer wg.Done()
 
-			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(workerID))
+			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(id))
 			r := rand.New(source)
 			d := rand.NewZipf(r, zipf.s, zipf.v, keySpace-1)
 
@@ -146,7 +134,7 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 				keyRank := (d.Uint64() + popularityShift.Load()) % keySpace
 
 				if r.Float64() < 0.3 {
-					keyRank = (keyRank + uint64(workerID*100)) % keySpace
+					keyRank = (keyRank + uint64(id*100)) % keySpace
 				}
 
 				key := fmt.Sprintf("key-%d", keyRank)
@@ -165,13 +153,11 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 				} else {
 					c.Set(key, []byte(key))
 				}
-
-				completedOps.Add(1)
 			}
-		}(workerID)
+		}(id)
 	}
 
 	wg.Wait()
-
+	close(done)
 	return hits.Load(), misses.Load()
 }

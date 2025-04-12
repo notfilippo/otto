@@ -308,14 +308,15 @@ func (c *cache) evictEntry(e *entryHeader) {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
-	c.entries.Add(^uint64(0))
-	c.memoryUsed.Add(-int64(e.size))
-
 	if e.size < 1 {
 		panic("otto: invariant violated: entry with size zero")
 	}
 
 	slots := cost(c.slotSize, e.size)
+
+	c.entries.Add(^uint64(0))
+	c.memoryUsed.Add(-int64(entryHeaderSize + (slots-1)*nextHeaderSize + e.size))
+
 	chunk := unsafe.Pointer(e)
 	for !c.alloc.Free(chunk) {
 		runtime.Goexit()
