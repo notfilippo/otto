@@ -12,481 +12,215 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package otto_test
+package otto
 
 import (
 	"bytes"
 	"fmt"
-	"math/rand/v2"
-	"os"
-	"path/filepath"
-	"runtime"
-	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
-
-	"github.com/notfilippo/otto"
 )
 
-var keyTrackingWindows = map[string]otto.TrackerWindow{
-	"15m": {BucketCount: 15, BucketDuration: time.Minute},
-	"1h":  {BucketCount: 15, BucketDuration: 4 * time.Minute},
-	"6h":  {BucketCount: 15, BucketDuration: 24 * time.Minute},
-}
-
-func TestCacheBasic(t *testing.T) {
-	// Create a cache with small slot size for testing
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Test setting and getting a simple value
-	key := "test-key"
-	value := []byte("test-value")
-
-	cache.Set(key, value)
-
-	result := cache.Get(key, nil)
-	if !bytes.Equal(result, value) {
-		t.Fatalf("Expected %q, got %q", value, result)
-	}
-
-	// Test getting a non-existent key
-	nonExistentResult := cache.Get("non-existent", nil)
-	if nonExistentResult != nil {
-		t.Fatalf("Expected nil, got %q", nonExistentResult)
-	}
-}
-
-func TestCacheMultipleValues(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Create test data
-	testData := map[string][]byte{
-		"key1": []byte("value1"),
-		"key2": []byte("value2"),
-		"key3": []byte("value3"),
-		"key4": []byte("value4"),
-		"key5": []byte("value5"),
-	}
-
-	// Store all test data
-	for k, v := range testData {
-		cache.Set(k, v)
-	}
-
-	// Retrieve and verify all test data
-	for k, expected := range testData {
-		result := cache.Get(k, nil)
-		if !bytes.Equal(result, expected) {
-			t.Fatalf("For key %q, expected %q, got %q", k, expected, result)
+func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int) Cache {
+	cache := NewEx(slotSize, mCapacity, sCapacity)
+	tb.Cleanup(func() {
+		if err := cache.Close(); err != nil {
+			tb.Fatalf("failed to close cache: %v", err)
 		}
+	})
+	return cache
+}
+
+const (
+	testSlotSize  = 16 + entryHeaderSize
+	testMCapacity = 90
+	testSCapacity = 10
+)
+
+func defaultCache(tb testing.TB) Cache {
+	return newCache(tb, testSlotSize, testMCapacity, testSCapacity)
+}
+
+func key(i int) string {
+	return fmt.Sprintf("key-%d", i)
+}
+
+func value(tb testing.TB, i int, slots int) []byte {
+	totalSlotsSize := slots * testSlotSize
+	totalValueSize := totalSlotsSize - entryHeaderSize - (nextHeaderSize * (slots - 1))
+	single := fmt.Appendf(nil, "value-%d", i)
+	if len(single) > totalValueSize {
+		tb.Fatalf("value-%d is too long, max is %d", i, totalValueSize)
+	}
+	buf := make([]byte, totalValueSize)
+	for i := range buf {
+		buf[i] = single[i%len(single)]
+	}
+	return buf
+}
+
+// cacheSet is a shortcut to set a key in the cache.
+func cacheSet(tb testing.TB, cache Cache, i int, slots int) {
+	cache.Set(key(i), value(tb, i, slots))
+}
+
+// cacheHit is a shortcut to check if a key is in the cache.
+func cacheHit(tb testing.TB, cache Cache, i int, slots int) {
+	v := cache.Get(key(i), nil)
+	if v == nil || !bytes.Equal(v, value(tb, i, slots)) {
+		tb.Fatalf("expected key-%d to be in cache", i)
 	}
 }
 
-func TestCacheLargeValues(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Create large test data (spans multiple slots)
-	largeValue := make([]byte, slotSize*3+5) // 53 bytes (spans 4 slots)
-	r := rand.NewChaCha8([32]byte{0})
-	r.Read(largeValue)
-
-	key := "large-key"
-	cache.Set(key, largeValue)
-
-	result := cache.Get(key, nil)
-	if !bytes.Equal(result, largeValue) {
-		t.Fatalf("Large value not retrieved correctly. Expected %d bytes, got %d bytes", len(largeValue), len(result))
+// cacheMiss is a shortcut to check if a key is not in the cache.
+func cacheMiss(tb testing.TB, cache Cache, i int) {
+	v := cache.Get(key(i), nil)
+	if v != nil {
+		tb.Fatalf("expected key-%d to NOT be in cache (found: %s)", i, v)
 	}
 }
 
-func TestCacheEviction(t *testing.T) {
-	// Create a cache with very limited capacity
-	slotSize := 16
-	slotCount := 10 // Very small, will force eviction
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
+func TestSanity(t *testing.T) {
+	c := defaultCache(t)
+	cacheSet(t, c, 0, 1)
+	cacheHit(t, c, 0, 1)
+}
 
-	// Fill the cache plus some
-	keys := []string{}
-	for i := range 20 {
-		key := fmt.Sprintf("key-%d", i)
-		value := fmt.Appendf(nil, "value-%d", i)
-		cache.Set(key, value)
-		keys = append(keys, key)
+func TestEvictionFillCapacity(t *testing.T) {
+	c := defaultCache(t)
+	for i := range testSCapacity {
+		cacheSet(t, c, i, 1)
 	}
 
-	// Some of the earlier keys should have been evicted
-	evicted := false
-	for _, key := range keys[:5] {
-		if cache.Get(key, nil) == nil {
-			evicted = true
-			break
-		}
-	}
-
-	if !evicted {
-		t.Fatal("Expected some keys to be evicted, but none were")
+	for i := range testSCapacity {
+		cacheHit(t, c, i, 1)
 	}
 }
 
-func TestCacheReuse(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	key := "reuse-key"
-	value := []byte("reuse-value")
-
-	cache.Set(key, value)
-
-	// Use a pre-allocated buffer
-	buf := make([]byte, 32)
-	result := cache.Get(key, buf)
-
-	// The result should point to the same underlying array as buf
-	if !bytes.Equal(result, value) {
-		t.Fatalf("Expected %q, got %q", value, result)
+func TestEvictionSQueue(t *testing.T) {
+	c := defaultCache(t)
+	for i := range testSCapacity {
+		cacheSet(t, c, i, 1)
 	}
+
+	cacheSet(t, c, testSCapacity, 1)
+	cacheMiss(t, c, 0)
 }
 
-func TestCacheClear(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Add some items
-	for i := range 10 {
-		key := fmt.Sprintf("key-%d", i)
-		value := fmt.Appendf(nil, "value-%d", i)
-		cache.Set(key, value)
+func TestEvictionPromotion(t *testing.T) {
+	c := defaultCache(t)
+	for i := range testSCapacity {
+		cacheSet(t, c, i, 1)
 	}
 
-	// Clear the cache
-	cache.Clear()
+	cacheHit(t, c, 0, 1)
+	cacheHit(t, c, 0, 1)
 
-	// Verify all items are gone
-	for i := range 10 {
-		key := fmt.Sprintf("key-%d", i)
-		if cache.Get(key, nil) != nil {
-			t.Fatalf("Item %s still exists after Clear()", key)
-		}
-	}
+	cacheSet(t, c, testSCapacity, 1)
 
-	// Verify we can still add new items
-	key := "new-key"
-	value := []byte("new-value")
-	cache.Set(key, value)
-
-	result := cache.Get(key, nil)
-	if !bytes.Equal(result, value) {
-		t.Fatalf("Expected %q, got %q after Clear()", value, result)
-	}
+	// key-0 should've been promoted to the m-queue.
+	cacheHit(t, c, 0, 1)
+	// ... and key-1 should've been evicted to make
+	// space for the Set.
+	cacheMiss(t, c, 1)
 }
 
-func TestCacheFrequency(t *testing.T) {
-	// Create a cache with limited capacity
-	slotSize := 16
-	slotCount := 20
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Add items to the cache
-	frequentKey := "frequent-key"
-	frequentValue := []byte("frequent-value")
-	cache.Set(frequentKey, frequentValue)
-
-	// Access this key many times to increase its frequency
-	for range 10 {
-		cache.Get(frequentKey, nil)
+func TestEvictionMultiSlot(t *testing.T) {
+	c := defaultCache(t)
+	for i := range testSCapacity {
+		cacheSet(t, c, i, 1)
 	}
 
-	// Fill the cache with other items to force eviction
-	for i := range 30 {
-		key := fmt.Sprintf("filler-%d", i)
-		value := fmt.Appendf(nil, "filler-value-%d", i)
-		cache.Set(key, value)
-	}
+	cacheSet(t, c, testSCapacity, 2)
 
-	// The frequent key should still be in the cache
-	result := cache.Get(frequentKey, nil)
-	if result == nil || !bytes.Equal(result, frequentValue) {
-		t.Fatalf("Frequently accessed item was incorrectly evicted")
-	}
+	// key-0 should've been evicted from s-queue.
+	cacheMiss(t, c, 0)
+	// ... but! key-1 still remains in s-queue even though
+	// the size of the queue now is testSCapacity + 1.
+	// This is expected and the queue will report its full
+	// capacity in the next eviction cycle.
+	cacheHit(t, c, 1, 1)
+
+	// Finally, we should've stored correctly the new entry.
+	cacheHit(t, c, testSCapacity, 2)
 }
 
-func TestCacheHeavyContention(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
+func TestEvictionMQueue(t *testing.T) {
+	c := defaultCache(t)
 
-	// Many goroutines fighting for the same keys
-	workers := 16
-	keys := 10 // Small number of keys to maximize contention
-	iterations := 1000
-
-	var wg sync.WaitGroup
-
-	// Start workers
-	for w := range workers {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-
-			for i := range iterations {
-				// Choose a key (all workers access all keys)
-				keyIndex := i % keys
-				key := fmt.Sprintf("shared-key-%d", keyIndex)
-
-				// Randomly choose between read and write
-				if i%3 == 0 { // 1/3 chance to write
-					value := fmt.Appendf(nil, "value-%d-%d", id, i)
-					cache.Set(key, value)
-				} else { // 2/3 chance to read
-					cache.Get(key, nil)
-				}
-
-				// Occasionally yield to increase contention
-				if i%50 == 0 {
-					runtime.Gosched()
-				}
-			}
-		}(w)
+	for i := range testMCapacity {
+		cacheSet(t, c, i, 1)
+		cacheHit(t, c, i, 1)
+		cacheHit(t, c, i, 1)
 	}
 
-	// Wait for all workers to finish
-	wg.Wait()
-
-	// Just verify the cache is still functioning
-	testKey := "test-after-contention"
-	testValue := []byte("test-value")
-	cache.Set(testKey, testValue)
-
-	result := cache.Get(testKey, nil)
-	if !bytes.Equal(result, testValue) {
-		t.Fatalf("Cache not functioning correctly after contention test")
+	for i := range testSCapacity {
+		cacheSet(t, c, i+testMCapacity, 1)
 	}
+
+	// The cache is now full with frequency for all entries
+	// set to 3.
+
+	for i := range testSCapacity + testMCapacity {
+		cacheHit(t, c, i, 1)
+	}
+
+	cacheSet(t, c, testSCapacity+testMCapacity, 1)
+
+	// The first key of the s-queue should be evicted.
+	cacheMiss(t, c, testMCapacity)
+
+	// ... while the first key of the m-queue should still
+	// be there.
+	cacheHit(t, c, 0, 1)
 }
 
-func TestCacheSerialization(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
+func TestClear(t *testing.T) {
+	c := defaultCache(t)
+	cacheSet(t, c, 0, 1)
+	cacheHit(t, c, 0, 1)
+	c.Clear()
+	cacheMiss(t, c, 0)
+}
 
-	// Add some test data
-	testData := map[string][]byte{
-		"key1": []byte("value1"),
-		"key2": []byte("value2"),
-		"key3": []byte("A longer value that spans multiple slots potentially"),
-		"key4": {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, // Binary data
-	}
-
-	// Store all test data
-	for k, v := range testData {
-		cache.Set(k, v)
-	}
-
-	// Create a buffer and serialize the cache
+func TestSerialize(t *testing.T) {
+	c := defaultCache(t)
+	cacheSet(t, c, 0, 1)
 	var buf bytes.Buffer
-	err := cache.Serialize(&buf)
+	err := c.Serialize(&buf)
 	if err != nil {
-		t.Fatalf("Failed to serialize cache: %v", err)
+		t.Fatalf("failed to serialize cache: %v", err)
 	}
 
-	// Deserialize into a new cache
-	newCache, err := otto.Deserialize(&buf, slotSize, slotCount)
+	c, err = DeserializeEx(&buf, testSlotSize, testMCapacity, testSCapacity)
 	if err != nil {
-		t.Fatalf("Failed to deserialize cache: %v", err)
+		t.Fatalf("failed to deserialize cache: %v", err)
 	}
-
-	// Verify all data is present in the new cache
-	for k, expected := range testData {
-		result := newCache.Get(k, nil)
-		if !bytes.Equal(result, expected) {
-			t.Fatalf("After deserialization, for key %q, expected %q, got %q", k, expected, result)
-		}
-	}
+	cacheHit(t, c, 0, 1)
 }
 
-func TestCacheFileStorage(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "cache.bin")
+func BenchmarkConcurrentGet(b *testing.B) {
+	c := defaultCache(b)
 
-	// Create and populate original cache
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
+	cacheSet(b, c, 0, 1)
 
-	// Add some test data
-	for i := range 10 {
-		key := fmt.Sprintf("file-key-%d", i)
-		value := fmt.Appendf(nil, "file-value-%d", i)
-		cache.Set(key, value)
-	}
-
-	// Save to file
-	err := otto.SaveToFile(cache, filePath)
-	if err != nil {
-		t.Fatalf("Failed to save cache to file: %v", err)
-	}
-
-	// Load from file
-	loadedCache, err := otto.LoadFromFile(filePath, slotSize, slotCount)
-	if err != nil {
-		t.Fatalf("Failed to load cache from file: %v", err)
-	}
-
-	// Verify data
-	for i := range 10 {
-		key := fmt.Sprintf("file-key-%d", i)
-		expected := fmt.Appendf(nil, "file-value-%d", i)
-		result := loadedCache.Get(key, nil)
-		if !bytes.Equal(result, expected) {
-			t.Fatalf("After file loading, for key %q, expected %q, got %q", key, expected, result)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cacheHit(b, c, 0, 1)
 		}
-	}
-
-	// Clean up
-	os.Remove(filePath)
+	})
 }
 
-func TestCacheDifferentSizes(t *testing.T) {
-	slotSize := 16
-	slotCount := 100
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
+func BenchmarkConcurrentSet(b *testing.B) {
+	c := defaultCache(b)
+	var counter int64
 
-	// Add items of different sizes
-	testCases := []struct {
-		key   string
-		value []byte
-	}{
-		{"empty", []byte{}},
-		{"small", []byte("small")},
-		{"exact-slot", make([]byte, slotSize)},
-		{"one-byte-over", make([]byte, slotSize+1)},
-		{"two-slots", make([]byte, slotSize*2)},
-		{"two-slots-plus", make([]byte, slotSize*2+5)},
-		{"many-slots", make([]byte, slotSize*7+3)},
-	}
-
-	// Fill the values with identifiable data
-	for i := range testCases {
-		for j := range testCases[i].value {
-			testCases[i].value[j] = byte(j % 256)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			i := atomic.AddInt64(&counter, 1)
+			cacheSet(b, c, int(i), 1)
 		}
-	}
-
-	// Store all items
-	for _, tc := range testCases {
-		cache.Set(tc.key, tc.value)
-	}
-
-	// Retrieve and verify all items
-	for _, tc := range testCases {
-		result := cache.Get(tc.key, nil)
-		if !bytes.Equal(result, tc.value) {
-			t.Fatalf("For key %q, size mismatch. Expected %d bytes, got %d bytes",
-				tc.key, len(tc.value), len(result))
-		}
-	}
-}
-
-func TestCacheMaxSlots(t *testing.T) {
-	slotSize := 16
-	slotCount := 10
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Create a value that would use almost all slots
-	maxValue := make([]byte, slotSize*(slotCount-1))
-	for i := range maxValue {
-		maxValue[i] = byte(i % 256)
-	}
-
-	cache.Set("max-slots", maxValue)
-
-	result := cache.Get("max-slots", nil)
-	if !bytes.Equal(result, maxValue) {
-		t.Fatalf("Failed to retrieve maximum-size value correctly")
-	}
-
-	// Another large value should cause eviction
-	anotherValue := make([]byte, slotSize*2)
-	for i := range anotherValue {
-		anotherValue[i] = byte(i % 256)
-	}
-
-	cache.Set("another-key", anotherValue)
-
-	// The first value might have been evicted
-	if cache.Get("max-slots", nil) == nil {
-		// This is expected behavior, the test passes
-		t.Log("Maximum size value was evicted as expected")
-	} else {
-		// This is also valid if the cache had room
-		result = cache.Get("another-key", nil)
-		if !bytes.Equal(result, anotherValue) {
-			t.Fatalf("Failed to retrieve second large value correctly")
-		}
-	}
-}
-
-func TestCacheGetAfterConcurrentEviction(t *testing.T) {
-	slotSize := 16
-	slotCount := 20 // Small size to force eviction
-	cache := otto.NewTracker(otto.New(slotSize, slotCount), keyTrackingWindows)
-	defer cache.Close()
-
-	// Add a test key
-	testKey := "eviction-test"
-	testValue := []byte("test-value")
-	cache.Set(testKey, testValue)
-
-	// Start a goroutine that will try to evict this key
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		// Add many large values to force eviction
-		for i := range 30 {
-			key := fmt.Sprintf("large-key-%d", i)
-			value := make([]byte, slotSize*2) // Each takes 2 slots
-			r := rand.NewChaCha8([32]byte{0})
-			r.Read(value)
-
-			cache.Set(key, value)
-
-			// Briefly yield to allow main thread to try getting
-			runtime.Gosched()
-		}
-	}()
-
-	// Try to get the test key repeatedly while the eviction is happening
-	for range 50 {
-		result := cache.Get(testKey, nil)
-
-		// Either it's our value or it's nil (evicted)
-		if result != nil && !bytes.Equal(result, testValue) {
-			t.Fatalf("Got corrupted data: expected nil or %q, got %q", testValue, result)
-		}
-
-		runtime.Gosched()
-	}
-
-	wg.Wait()
+	})
 }

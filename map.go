@@ -222,10 +222,10 @@ func newMapTable(minTableLen int) *mapTable {
 // contents. The copied xsync Map should not be modified while
 // this call is made. If the copied Map is modified, the copying
 // behavior is the same as in the Range method.
-func toPlainMap(m *hmap) map[uint64]*entry {
-	pm := make(map[uint64]*entry)
+func toPlainMap(m *hmap) map[uint64]*entryHeader {
+	pm := make(map[uint64]*entryHeader)
 	if m != nil {
-		m.Range(func(key uint64, value *entry) bool {
+		m.Range(func(key uint64, value *entryHeader) bool {
 			pm[key] = value
 			return true
 		})
@@ -236,7 +236,7 @@ func toPlainMap(m *hmap) map[uint64]*entry {
 // Load returns the value stored in the map for a key, or nil if no
 // value is present.
 // The ok result indicates whether value was found in the map.
-func (m *hmap) Load(hash uint64) (value *entry, ok bool) {
+func (m *hmap) Load(hash uint64) (value *entryHeader, ok bool) {
 	table := (*mapTable)(atomic.LoadPointer(&m.table))
 	bidx := uint64(len(table.buckets)-1) & hash
 	b := &table.buckets[bidx]
@@ -270,10 +270,10 @@ func (m *hmap) Load(hash uint64) (value *entry, ok bool) {
 }
 
 // Store sets the value for a key.
-func (m *hmap) Store(key uint64, value *entry) {
+func (m *hmap) Store(key uint64, value *entryHeader) {
 	m.doCompute(
 		key,
-		func(*entry, bool) (*entry, bool) {
+		func(*entryHeader, bool) (*entryHeader, bool) {
 			return value, false
 		},
 		false,
@@ -284,10 +284,10 @@ func (m *hmap) Store(key uint64, value *entry) {
 // LoadOrStore returns the existing value for the key if present.
 // Otherwise, it stores and returns the given value.
 // The loaded result is true if the value was loaded, false if stored.
-func (m *hmap) LoadOrStore(key uint64, value *entry) (actual *entry, loaded bool) {
+func (m *hmap) LoadOrStore(key uint64, value *entryHeader) (actual *entryHeader, loaded bool) {
 	return m.doCompute(
 		key,
-		func(*entry, bool) (*entry, bool) {
+		func(*entryHeader, bool) (*entryHeader, bool) {
 			return value, false
 		},
 		true,
@@ -300,10 +300,10 @@ func (m *hmap) LoadOrStore(key uint64, value *entry) (actual *entry, loaded bool
 // It stores the new value and returns the existing one, if present.
 // The loaded result is true if the existing value was loaded,
 // false otherwise.
-func (m *hmap) LoadAndStore(key uint64, value *entry) (actual *entry, loaded bool) {
+func (m *hmap) LoadAndStore(key uint64, value *entryHeader) (actual *entryHeader, loaded bool) {
 	return m.doCompute(
 		key,
-		func(*entry, bool) (*entry, bool) {
+		func(*entryHeader, bool) (*entryHeader, bool) {
 			return value, false
 		},
 		false,
@@ -320,10 +320,10 @@ func (m *hmap) LoadAndStore(key uint64, value *entry) (actual *entry, loaded boo
 // is executed. It means that modifications on other entries in
 // the bucket will be blocked until the valueFn executes. Consider
 // this when the function includes long-running operations.
-func (m *hmap) LoadOrCompute(key uint64, valueFn func() *entry) (actual *entry, loaded bool) {
+func (m *hmap) LoadOrCompute(key uint64, valueFn func() *entryHeader) (actual *entryHeader, loaded bool) {
 	return m.doCompute(
 		key,
-		func(*entry, bool) (*entry, bool) {
+		func(*entryHeader, bool) (*entryHeader, bool) {
 			return valueFn(), false
 		},
 		true,
@@ -344,11 +344,11 @@ func (m *hmap) LoadOrCompute(key uint64, valueFn func() *entry) (actual *entry, 
 // this when the function includes long-running operations.
 func (m *hmap) LoadOrTryCompute(
 	key uint64,
-	valueFn func() (newValue *entry, cancel bool),
-) (value *entry, loaded bool) {
+	valueFn func() (newValue *entryHeader, cancel bool),
+) (value *entryHeader, loaded bool) {
 	return m.doCompute(
 		key,
-		func(*entry, bool) (*entry, bool) {
+		func(*entryHeader, bool) (*entryHeader, bool) {
 			nv, c := valueFn()
 			if !c {
 				return nv, false
@@ -374,18 +374,18 @@ func (m *hmap) LoadOrTryCompute(
 // this when the function includes long-running operations.
 func (m *hmap) Compute(
 	key uint64,
-	valueFn func(oldValue *entry, loaded bool) (newValue *entry, delete bool),
-) (actual *entry, ok bool) {
+	valueFn func(oldValue *entryHeader, loaded bool) (newValue *entryHeader, delete bool),
+) (actual *entryHeader, ok bool) {
 	return m.doCompute(key, valueFn, false, true)
 }
 
 // LoadAndDelete deletes the value for a key, returning the previous
 // value if any. The loaded result reports whether the key was
 // present.
-func (m *hmap) LoadAndDelete(key uint64) (value *entry, loaded bool) {
+func (m *hmap) LoadAndDelete(key uint64) (value *entryHeader, loaded bool) {
 	return m.doCompute(
 		key,
-		func(value *entry, loaded bool) (*entry, bool) {
+		func(value *entryHeader, loaded bool) (*entryHeader, bool) {
 			return value, true
 		},
 		false,
@@ -397,7 +397,7 @@ func (m *hmap) LoadAndDelete(key uint64) (value *entry, loaded bool) {
 func (m *hmap) Delete(key uint64) {
 	m.doCompute(
 		key,
-		func(value *entry, loaded bool) (*entry, bool) {
+		func(value *entryHeader, loaded bool) (*entryHeader, bool) {
 			return value, true
 		},
 		false,
@@ -407,9 +407,9 @@ func (m *hmap) Delete(key uint64) {
 
 func (m *hmap) doCompute(
 	key uint64,
-	valueFn func(oldValue *entry, loaded bool) (*entry, bool),
+	valueFn func(oldValue *entryHeader, loaded bool) (*entryHeader, bool),
 	loadIfExists, computeOnly bool,
-) (*entry, bool) {
+) (*entryHeader, bool) {
 	// Read-only path.
 	if loadIfExists {
 		if v, ok := m.Load(key); ok {
@@ -504,7 +504,7 @@ func (m *hmap) doCompute(
 			if b.next == nil {
 				if emptyb != nil {
 					// Insertion into an existing bucket.
-					var zeroV *entry
+					var zeroV *entryHeader
 					newValue, del := valueFn(zeroV, false)
 					if del {
 						unlockBucket(&rootb.topHashMutex)
@@ -528,7 +528,7 @@ func (m *hmap) doCompute(
 					goto compute_attempt
 				}
 				// Insertion into a new bucket.
-				var zeroV *entry
+				var zeroV *entryHeader
 				newValue, del := valueFn(zeroV, false)
 				if del {
 					unlockBucket(&rootb.topHashMutex)
@@ -695,7 +695,7 @@ func isEmptyBucket(rootb *bucketPadded) bool {
 // creation, modification and deletion. However, the concurrent
 // modification rule apply, i.e. the changes may be not reflected
 // in the subsequently iterated entries.
-func (m *hmap) Range(f func(key uint64, value *entry) bool) {
+func (m *hmap) Range(f func(key uint64, value *entryHeader) bool) {
 	var zeroEntry rangeEntry
 	// Pre-allocate array big enough to fit entries for most hash tables.
 	bentries := make([]rangeEntry, 0, 16*entriesPerMapBucket)
@@ -753,8 +753,8 @@ func derefKey(keyPtr uint64) uint64 {
 	return keyPtr
 }
 
-func derefValue(valuePtr unsafe.Pointer) *entry {
-	return (*entry)(valuePtr)
+func derefValue(valuePtr unsafe.Pointer) *entryHeader {
+	return (*entryHeader)(valuePtr)
 }
 
 func lockBucket(mu *uint64) {

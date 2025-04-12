@@ -125,19 +125,18 @@ func defaultEx(slotCount int) (mCapacity, sCapacity int) {
 func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 	slotCount := mCapacity + sCapacity
 
-	entryAlign := int(unsafe.Alignof(entry{}))
+	entryAlign := int(unsafe.Alignof(entryHeader{}))
 
-	fullSlotSize := entryStructSize + slotSize
-	remainder := fullSlotSize % entryAlign
+	slotSize = max(slotSize, entryHeaderSize*2)
+
+	// We need to round up to ensure alignment.
+	remainder := slotSize % entryAlign
 	if remainder != 0 {
-		// We need to round up to ensure alignment.
-		fullSlotSize = fullSlotSize + (entryAlign - remainder)
+		slotSize = slotSize + (entryAlign - remainder)
 	}
 
-	slotSize = fullSlotSize - entryStructSize
-
 	return &cache{
-		alloc:     newAllocator(fullSlotSize, slotCount),
+		alloc:     newAllocator(slotSize, slotCount),
 		m:         newEntryQueue(mCapacity, slotSize),
 		s:         newEntryQueue(sCapacity, slotSize),
 		g:         newGhost(mCapacity),
@@ -172,90 +171,92 @@ func (c *cache) set(hash uint64, val []byte) {
 	}
 
 	var (
-		prev  *entry
-		first *entry
-		i     int
+		e      *entryHeader
+		prev   *unsafe.Pointer
+		offset int
 	)
 
-	for !c.alloc.Alloc(slots, func(b *byte) {
-		e := (*entry)(unsafe.Pointer(b))
+	for !c.alloc.Alloc(slots, func(b unsafe.Pointer) {
+		buf := unsafe.Slice((*byte)(b), c.slotSize)
 		if prev != nil {
-			prev.next = b
+			// Other bytes buffer
+			h := (*nextHeader)(unsafe.Pointer(b))
+			*prev = b
+			prev = &h.next
+			offset += copy(
+				buf[nextHeaderSize:],
+				val[offset:],
+			)
 		} else {
-			first = e
+			// First byte buffer
+			e = (*entryHeader)(unsafe.Pointer(b))
+			prev = &e.next
+			offset += copy(
+				buf[entryHeaderSize:],
+				val[offset:],
+			)
 		}
-
-		e.hash = hash
-		e.next = nil
-		e.size = size
-		e.frequency.Store(0)
-		e.access.Store(0)
-
-		buf := unsafe.Slice(b, entryStructSize+c.slotSize)
-		copy(buf[entryStructSize:], val[i*c.slotSize:])
-
-		prev = e
-		i += 1
 	}) {
 		c.evict()
 	}
 
-	c.memoryUsed.Add(int64(size))
+	e.hash = hash
+	e.size = size
+	e.frequency.Store(0)
+	e.access.Store(0)
 
-	c.hashmap.Store(hash, first)
+	c.memoryUsed.Add(int64(entryHeaderSize + (slots-1)*nextHeaderSize + size))
+
+	c.hashmap.Store(hash, e)
 	c.entries.Add(1)
 
 	if c.g.In(hash) {
-		for !c.m.Push(first) {
+		for !c.m.Push(e) {
 			c.evictM()
 		}
 	} else {
-		for !c.s.Push(first) {
+		for !c.s.Push(e) {
 			c.evictS()
 		}
 	}
 }
 
-func (c *cache) Get(key string, buf []byte) []byte {
+func (c *cache) Get(key string, dst []byte) []byte {
 	if c.closed.Load() {
 		return nil
 	}
 
 	hash := maphash.String(c.seed, key)
 
-	return c.get(hash, buf)
+	return c.get(hash, dst)
 }
 
-func (c *cache) get(hash uint64, buf []byte) []byte {
+func (c *cache) get(hash uint64, dst []byte) []byte {
 	e, ok := c.hashmap.Load(hash)
 	if !ok || e == nil {
 		return nil
 	}
 
-	for {
-		access := e.access.Load()
-		if access < 0 {
-			return nil
-		}
-
-		if e.access.CompareAndSwap(access, access+1) {
-			break
-		}
+	if e.access.Add(1) < 0 {
+		e.access.Store(math.MinInt32)
+		return nil
 	}
 
 	for {
 		freq := e.frequency.Load()
+		if freq == 3 {
+			break
+		}
 
 		if e.frequency.CompareAndSwap(freq, min(freq+1, 3)) {
 			break
 		}
 	}
 
-	buf = c.read(e, buf)
+	dst = c.read(e, dst)
 
 	e.access.Add(-1)
-
-	return buf
+	return dst
 }
 
 func (c *cache) evict() {
@@ -269,6 +270,10 @@ func (c *cache) evict() {
 func (c *cache) evictS() {
 	t, ok := c.s.Pop()
 	for ok && t != nil {
+		// Small variation from the S3-FIFO algorithm. If a value of
+		// frequency 0 is concurrently accessed as the eviction runs
+		// it will have a frequency of 1 and it will still get promoted
+		// to the m-queue.
 		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
 			c.g.Add(t.hash)
 			c.evictEntry(t)
@@ -276,9 +281,6 @@ func (c *cache) evictS() {
 		}
 
 		for !c.m.Push(t) {
-			c.evictM()
-		}
-		for c.m.IsFull() {
 			c.evictM()
 		}
 
@@ -310,7 +312,7 @@ func (c *cache) evictM() {
 	}
 }
 
-func (c *cache) evictEntry(e *entry) {
+func (c *cache) evictEntry(e *entryHeader) {
 	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || prev != e {
 		panic("otto: invariant violated: entry already deleted")
 	}
@@ -322,9 +324,9 @@ func (c *cache) evictEntry(e *entry) {
 		panic("otto: invariant violated: entry with size zero")
 	}
 
-	chunk := (*byte)(unsafe.Pointer(e))
+	chunk := unsafe.Pointer(e)
 	for range cost(c.slotSize, e.size) {
-		e := (*entry)(unsafe.Pointer(chunk))
+		e := (*entryHeader)(chunk)
 		next := e.next
 		for !c.alloc.Free(chunk) {
 			runtime.Gosched()
@@ -333,33 +335,51 @@ func (c *cache) evictEntry(e *entry) {
 	}
 }
 
-func (c *cache) read(e *entry, buf []byte) []byte {
+func (c *cache) read(e *entryHeader, dst []byte) []byte {
 	size := e.size
-	if cap(buf) < size {
-		buf = make([]byte, size)
+	if cap(dst) < size {
+		dst = make([]byte, size)
 	} else {
-		buf = buf[:size]
+		dst = dst[:size]
 	}
 
 	slots := cost(c.slotSize, size)
 
-	slot := (*byte)(unsafe.Pointer(e))
-	for i := range slots {
-		e := (*entry)(unsafe.Pointer(slot))
+	slot := unsafe.Pointer(e)
+	if slot == nil {
+		// Corruption
+		return nil
+	}
+
+	buf := unsafe.Slice(
+		(*byte)(unsafe.Add(slot, entryHeaderSize)),
+		min(c.slotSize-entryHeaderSize, size),
+	)
+
+	offset := copy(dst, buf)
+
+	slot = e.next
+	for range slots - 1 {
 		if slot == nil {
 			// Corruption happened, returning nil
 			return nil
 		}
 
-		source := unsafe.Slice(slot, c.slotSize+entryStructSize)
+		e := (*nextHeader)(slot)
 
-		end := min((i+1)*c.slotSize, size)
-		copy(buf[i*c.slotSize:end], source[entryStructSize:])
+		buf := unsafe.Slice(
+			(*byte)(unsafe.Add(slot, nextHeaderSize)),
+			min(offset+c.slotSize-nextHeaderSize, size),
+		)
+		offset += copy(
+			dst[offset:],
+			buf,
+		)
 
 		slot = e.next
 	}
 
-	return buf
+	return dst
 }
 
 func (c *cache) Clear() {
@@ -415,7 +435,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	}
 
 	plain := make(map[uint64][]byte)
-	c.hashmap.Range(func(k uint64, v *entry) bool {
+	c.hashmap.Range(func(k uint64, v *entryHeader) bool {
 		plain[k] = c.get(k, nil)
 		return true
 	})

@@ -71,7 +71,7 @@ func TestHitRatio(t *testing.T) {
 				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := otto.New(32, size)
+							c := otto.New(1<<10, size)
 							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 
@@ -128,6 +128,8 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 
 			burstMode := false
 
+			var data []byte
+
 			for range ops {
 				// Occasionally switch between normal and burst modes
 				if r.Float64() < 0.01 {
@@ -149,10 +151,9 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 
 				key := fmt.Sprintf("key-%d", keyRank)
 
-				var data []byte
 				if r.Float64() < 0.85 {
-					data := c.Get(key, data)
-					if len(data) == 0 || string(data) != key {
+					value := c.Get(key, data)
+					if len(value) == 0 || string(value) != key {
 						misses.Add(1)
 
 						// Simulate backend retrieval

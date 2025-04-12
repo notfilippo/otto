@@ -19,7 +19,7 @@ import (
 	"unsafe"
 )
 
-type entry struct {
+type entryHeader struct {
 	frequency atomic.Int32
 	//lint:ignore U1000 prevents false sharing
 	fpad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
@@ -29,15 +29,30 @@ type entry struct {
 	apad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
 
 	hash uint64
-	next *byte
-
 	size int
+
+	next unsafe.Pointer
 }
 
-var entryStructSize = int(unsafe.Sizeof(entry{}))
+type nextHeader struct {
+	next unsafe.Pointer
+}
+
+const (
+	entryHeaderSize = int(unsafe.Sizeof(entryHeader{}))
+	nextHeaderSize  = int(unsafe.Sizeof(nextHeader{}))
+)
 
 func cost(slotSize, entrySize int) int {
-	return (entrySize + slotSize - 1) / slotSize
+	firstSlotValueSize := slotSize - entryHeaderSize
+	if entrySize <= firstSlotValueSize {
+		return 1
+	}
+
+	otherSlotsValueSize := slotSize - nextHeaderSize
+	entrySize -= firstSlotValueSize
+
+	return 1 + (entrySize+otherSlotsValueSize-1)/otherSlotsValueSize
 }
 
 type entryQueue struct {
@@ -45,19 +60,19 @@ type entryQueue struct {
 	//lint:ignore U1000 prevents false sharing
 	cpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
 
-	fifo *queue[*entry]
+	fifo *queue[*entryHeader]
 
 	slotSize int
 }
 
 func newEntryQueue(cap int, slotSize int) *entryQueue {
 	return &entryQueue{
-		fifo:     newQueue[*entry](cap),
+		fifo:     newQueue[*entryHeader](cap),
 		slotSize: slotSize,
 	}
 }
 
-func (q *entryQueue) Push(e *entry) bool {
+func (q *entryQueue) Push(e *entryHeader) bool {
 	size := e.size
 	if q.fifo.TryEnqueue(e) {
 		q.cost.Add(int64(cost(q.slotSize, size)))
@@ -67,7 +82,7 @@ func (q *entryQueue) Push(e *entry) bool {
 	return false
 }
 
-func (q *entryQueue) Pop() (*entry, bool) {
+func (q *entryQueue) Pop() (*entryHeader, bool) {
 	if e, ok := q.fifo.TryDequeue(); ok {
 		q.cost.Add(-int64(cost(q.slotSize, e.size)))
 		return e, true
