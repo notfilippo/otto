@@ -39,9 +39,19 @@ type nextHeader struct {
 }
 
 const (
-	entryHeaderSize = int(unsafe.Sizeof(entryHeader{}))
-	nextHeaderSize  = int(unsafe.Sizeof(nextHeader{}))
+	entryHeaderSize  = int(unsafe.Sizeof(entryHeader{}))
+	entryHeaderAlign = int(unsafe.Alignof(entryHeader{}))
+	nextHeaderSize   = int(unsafe.Sizeof(nextHeader{}))
 )
+
+func alignToEntry(slotSize int) int {
+	remainder := slotSize % entryHeaderAlign
+	if remainder != 0 {
+		slotSize = slotSize + (entryHeaderAlign - remainder)
+	}
+
+	return slotSize
+}
 
 func cost(slotSize, entrySize int) int {
 	firstSlotValueSize := slotSize - entryHeaderSize

@@ -31,8 +31,8 @@ func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int) Cache {
 	return cache
 }
 
-const (
-	testSlotSize  = 16 + entryHeaderSize
+var (
+	testSlotSize  = alignToEntry(16 + entryHeaderSize)
 	testMCapacity = 90
 	testSCapacity = 10
 )
@@ -67,8 +67,12 @@ func cacheSet(tb testing.TB, cache Cache, i int, slots int) {
 // cacheHit is a shortcut to check if a key is in the cache.
 func cacheHit(tb testing.TB, cache Cache, i int, slots int) {
 	v := cache.Get(key(i), nil)
-	if v == nil || !bytes.Equal(v, value(tb, i, slots)) {
+	if v == nil {
 		tb.Fatalf("expected key-%d to be in cache", i)
+	}
+	expected := value(tb, i, slots)
+	if !bytes.Equal(v, expected) {
+		tb.Fatalf("expected key-%d to have value %x instead found value %x", i, expected, v)
 	}
 }
 
@@ -82,8 +86,11 @@ func cacheMiss(tb testing.TB, cache Cache, i int) {
 
 func TestSanity(t *testing.T) {
 	c := defaultCache(t)
-	cacheSet(t, c, 0, 1)
-	cacheHit(t, c, 0, 1)
+
+	for i := range testSCapacity + testMCapacity - 1 {
+		cacheSet(t, c, i, i+1)
+		cacheHit(t, c, i, i+1)
+	}
 }
 
 func TestEvictionFillCapacity(t *testing.T) {

@@ -124,16 +124,7 @@ func defaultEx(slotCount int) (mCapacity, sCapacity int) {
 // learn more about S3-FIFO visit https://s3fifo.com/
 func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 	slotCount := mCapacity + sCapacity
-
-	entryAlign := int(unsafe.Alignof(entryHeader{}))
-
-	slotSize = max(slotSize, entryHeaderSize*2)
-
-	// We need to round up to ensure alignment.
-	remainder := slotSize % entryAlign
-	if remainder != 0 {
-		slotSize = slotSize + (entryAlign - remainder)
-	}
+	slotSize = alignToEntry(slotSize)
 
 	return &cache{
 		alloc:     newAllocator(slotSize, slotCount),
@@ -324,9 +315,15 @@ func (c *cache) evictEntry(e *entryHeader) {
 		panic("otto: invariant violated: entry with size zero")
 	}
 
+	slots := cost(c.slotSize, e.size)
 	chunk := unsafe.Pointer(e)
-	for range cost(c.slotSize, e.size) {
-		e := (*entryHeader)(chunk)
+	for !c.alloc.Free(chunk) {
+		runtime.Goexit()
+	}
+
+	chunk = e.next
+	for range slots - 1 {
+		e := (*nextHeader)(chunk)
 		next := e.next
 		for !c.alloc.Free(chunk) {
 			runtime.Gosched()
@@ -365,18 +362,17 @@ func (c *cache) read(e *entryHeader, dst []byte) []byte {
 			return nil
 		}
 
-		e := (*nextHeader)(slot)
-
 		buf := unsafe.Slice(
 			(*byte)(unsafe.Add(slot, nextHeaderSize)),
-			min(offset+c.slotSize-nextHeaderSize, size),
+			c.slotSize-nextHeaderSize,
 		)
 		offset += copy(
 			dst[offset:],
 			buf,
 		)
 
-		slot = e.next
+		h := (*nextHeader)(slot)
+		slot = h.next
 	}
 
 	return dst
