@@ -504,11 +504,10 @@ func (m *hmap) doCompute(
 			if b.next == nil {
 				if emptyb != nil {
 					// Insertion into an existing bucket.
-					var zeroV *entryHeader
-					newValue, del := valueFn(zeroV, false)
+					newValue, del := valueFn(nil, false)
 					if del {
 						unlockBucket(&rootb.topHashMutex)
-						return zeroV, false
+						return nil, false
 					}
 					// First we update the value, then the key.
 					// This is important for atomic snapshot states.
@@ -528,8 +527,7 @@ func (m *hmap) doCompute(
 					goto compute_attempt
 				}
 				// Insertion into a new bucket.
-				var zeroV *entryHeader
-				newValue, del := valueFn(zeroV, false)
+				newValue, del := valueFn(nil, false)
 				if del {
 					unlockBucket(&rootb.topHashMutex)
 					return newValue, false
