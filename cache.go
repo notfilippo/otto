@@ -236,7 +236,7 @@ func (c *cache) Get(key string, dst []byte) []byte {
 
 func (c *cache) get(hash uint64, dst []byte) []byte {
 	i, ok := c.hashmap.Load(hash)
-	if !ok {
+	if !ok || i == -1 {
 		return nil
 	}
 
