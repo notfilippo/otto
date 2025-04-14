@@ -81,21 +81,30 @@ type cache struct {
 	//lint:ignore U1000 prevents false sharing
 	cpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
 
-	entries atomic.Uint64
+	mSize atomic.Int64
 	//lint:ignore U1000 prevents false sharing
-	epad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
+	mpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
 
-	memoryUsed atomic.Int64
+	sSize atomic.Int64
 	//lint:ignore U1000 prevents false sharing
-	mpad [cacheLineSize - unsafe.Sizeof(atomic.Int64{})]byte
+	spad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
 
-	alloc   *allocator
-	m, s    *entryQueue
-	g       *ghost
-	hashmap *hmap[*entryHeader]
+	data []byte
 
-	seed                maphash.Seed
-	slotSize, slotCount int
+	entries []entry
+
+	m, s *queue[int]
+	g    *ghost
+
+	alloc   *queue[int]
+	hashmap *hmap[int]
+
+	seed              maphash.Seed
+	slotSize, slotCap int
+
+	// Stats
+	entriesCount atomic.Uint64
+	memoryUsed   atomic.Int64
 }
 
 // New creates a new otto.Cache with a fixed size of slotSize * slotCount. Calling the
@@ -116,26 +125,37 @@ func defaultEx(slotCount int) (mCapacity, sCapacity int) {
 	return mCapacity, sCapacity
 }
 
-// NewEx creates a new otto.Cache with a fixed size of slotSize * (mCapacity + sCapacity).
+// NewEx creates a new otto.Cache with a fixed size of slotSize * (mCap + sCap).
 // Calling the Set method on a full cache will cause elements to be evicted according to
 // the S3-FIFO algorithm.
 //
 // mCapacity and sCapacity configure the size of the m and the s queue respectively. To
 // learn more about S3-FIFO visit https://s3fifo.com/
-func NewEx(slotSize, mCapacity, sCapacity int) Cache {
-	slotCount := mCapacity + sCapacity
-	slotSize = alignToEntry(slotSize)
+func NewEx(slotSize, mCap, sCap int) Cache {
+	slotCap := mCap + sCap
+	alloc := newQueue[int](slotCap)
+	for i := range slotCap {
+		if !alloc.TryEnqueue(i) {
+			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
+		}
+	}
 
 	return &cache{
-		alloc:     newAllocator(slotSize, slotCount),
-		m:         newEntryQueue(mCapacity, slotSize),
-		s:         newEntryQueue(sCapacity, slotSize),
-		g:         newGhost(mCapacity),
-		hashmap:   newMap[*entryHeader](slotCount),
-		seed:      maphash.MakeSeed(),
-		slotSize:  slotSize,
-		slotCount: slotCount,
+		data:     make([]byte, slotCap*slotSize),
+		entries:  make([]entry, slotCap),
+		m:        newQueue[int](mCap),
+		s:        newQueue[int](sCap),
+		g:        newGhost(mCap),
+		alloc:    alloc,
+		hashmap:  newMap[int](slotCap),
+		seed:     maphash.MakeSeed(),
+		slotSize: slotSize,
+		slotCap:  slotCap,
 	}
+}
+
+func (c *cache) slice(i int) []byte {
+	return c.data[i*c.slotSize : (i+1)*c.slotSize]
 }
 
 func (c *cache) Set(key string, val []byte) {
@@ -149,7 +169,7 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
+	if _, ok := c.hashmap.LoadOrStore(hash, -1); ok {
 		// Already in the cache and we don't support updates
 		return
 	}
@@ -157,58 +177,50 @@ func (c *cache) set(hash uint64, val []byte) {
 	size := len(val)
 	slots := cost(c.slotSize, size)
 
-	if slots > c.slotCount {
+	if slots > c.slotCap {
 		panic(fmt.Sprintf("otto: entry %d cannot fit in cache size = %d slots = %d", hash, size, slots))
 	}
 
 	var (
-		e      *entryHeader
-		prev   *atomic.Pointer[byte]
+		first  int = -1
+		prev   int
 		offset int
 	)
 
-	for !c.alloc.Alloc(slots, func(b *byte) {
-		buf := unsafe.Slice((*byte)(b), c.slotSize)
-		if prev != nil {
-			// Other bytes buffer
-			h := (*nextHeader)(unsafe.Pointer(b))
-			prev.Store(b)
-			prev = &h.next
-			offset += copy(
-				buf[nextHeaderSize:],
-				val[offset:],
-			)
+	for !c.alloc.TryDequeueBatch(slots, func(i int) {
+		if first == -1 {
+			first = i
 		} else {
-			// First byte buffer
-			e = (*entryHeader)(unsafe.Pointer(b))
-			prev = &e.next
-			offset += copy(
-				buf[entryHeaderSize:],
-				val[offset:],
-			)
+			c.entries[prev].next.Store(int64(i))
 		}
+
+		offset += copy(c.slice(i), val[offset:])
+		prev = i
 	}) {
 		c.evict()
 	}
 
+	e := &c.entries[first]
 	e.hash = hash
 	e.size = size
 	e.frequency.Store(0)
 	e.access.Store(0)
 
-	c.memoryUsed.Add(int64(entryHeaderSize + (slots-1)*nextHeaderSize + size))
+	c.memoryUsed.Add(int64(size))
 
-	c.hashmap.Store(hash, e)
-	c.entries.Add(1)
+	c.hashmap.Store(hash, first)
+	c.entriesCount.Add(1)
 
 	if c.g.In(hash) {
-		for !c.m.Push(e) {
+		for !c.m.TryEnqueue(first) {
 			c.evictM()
 		}
+		c.mSize.Add(int64(slots))
 	} else {
-		for !c.s.Push(e) {
+		for !c.s.TryEnqueue(first) {
 			c.evictS()
 		}
+		c.sSize.Add(int64(slots))
 	}
 }
 
@@ -223,10 +235,12 @@ func (c *cache) Get(key string, dst []byte) []byte {
 }
 
 func (c *cache) get(hash uint64, dst []byte) []byte {
-	e, ok := c.hashmap.Load(hash)
-	if !ok || e == nil {
+	i, ok := c.hashmap.Load(hash)
+	if !ok {
 		return nil
 	}
+
+	e := &c.entries[i]
 
 	if e.access.Add(1) < 0 {
 		e.access.Store(math.MinInt32)
@@ -244,14 +258,15 @@ func (c *cache) get(hash uint64, dst []byte) []byte {
 		}
 	}
 
-	dst = c.read(e, dst)
+	dst = c.read(i, e, dst)
 
 	e.access.Add(-1)
+
 	return dst
 }
 
 func (c *cache) evict() {
-	if c.s.IsFull() {
+	if c.sSize.Load() >= int64(c.s.cap) {
 		c.evictS()
 	} else {
 		c.evictM()
@@ -259,52 +274,64 @@ func (c *cache) evict() {
 }
 
 func (c *cache) evictS() {
-	t, ok := c.s.Pop()
-	for ok && t != nil {
+	i, ok := c.s.TryDequeue()
+	for ok {
+		e := &c.entries[i]
+		slots := int64(cost(c.slotSize, e.size))
+
+		c.sSize.Add(-slots)
+
 		// Small variation from the S3-FIFO algorithm. If a value of
 		// frequency 0 is concurrently accessed as the eviction runs
 		// it will have a frequency of 1 and it will still get promoted
 		// to the m-queue.
-		if t.frequency.Load() <= 1 && t.access.CompareAndSwap(0, math.MinInt32) {
-			c.g.Add(t.hash)
-			c.evictEntry(t)
+		if e.frequency.Load() <= 1 && e.access.CompareAndSwap(0, math.MinInt32) {
+			c.g.Add(e.hash)
+			c.evictEntry(i, e)
 			return
 		}
 
-		for !c.m.Push(t) {
+		for !c.m.TryEnqueue(i) {
 			c.evictM()
 		}
+		c.mSize.Add(slots)
 
-		t, ok = c.s.Pop()
+		i, ok = c.s.TryDequeue()
 	}
 }
 
 func (c *cache) evictM() {
-	t, ok := c.m.Pop()
-	for ok && t != nil {
-		if t.frequency.Load() <= 0 && t.access.CompareAndSwap(0, math.MinInt32) {
-			c.evictEntry(t)
+	i, ok := c.m.TryDequeue()
+	for ok {
+		e := &c.entries[i]
+		slots := int64(cost(c.slotSize, e.size))
+
+		c.mSize.Add(-slots)
+
+		if e.frequency.Load() <= 0 && e.access.CompareAndSwap(0, math.MinInt32) {
+			c.evictEntry(i, e)
 			return
 		}
 
 		for {
-			freq := t.frequency.Load()
+			freq := e.frequency.Load()
 
-			if t.frequency.CompareAndSwap(freq, max(0, freq-1)) {
-				for !c.m.Push(t) {
+			if e.frequency.CompareAndSwap(freq, max(0, freq-1)) {
+				for !c.m.TryEnqueue(i) {
 					c.evictM()
 				}
+				c.mSize.Add(slots)
 
 				break
 			}
 		}
 
-		t, ok = c.m.Pop()
+		i, ok = c.m.TryDequeue()
 	}
 }
 
-func (c *cache) evictEntry(e *entryHeader) {
-	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || prev != e {
+func (c *cache) evictEntry(i int, e *entry) {
+	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || prev != i {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
@@ -314,26 +341,21 @@ func (c *cache) evictEntry(e *entryHeader) {
 
 	slots := cost(c.slotSize, e.size)
 
-	c.entries.Add(^uint64(0))
-	c.memoryUsed.Add(-int64(entryHeaderSize + (slots-1)*nextHeaderSize + e.size))
+	c.entriesCount.Add(^uint64(0))
+	c.memoryUsed.Add(-int64(e.size))
 
-	chunk := (*byte)(unsafe.Pointer(e))
-	for !c.alloc.Free(chunk) {
-		runtime.Goexit()
-	}
-
-	chunk = e.next.Load()
-	for range slots - 1 {
-		e := (*nextHeader)(unsafe.Pointer(chunk))
-		next := e.next.Load()
-		for !c.alloc.Free(chunk) {
+	var next int
+	for range slots {
+		next = int(e.next.Load())
+		e = &c.entries[next]
+		for !c.alloc.TryEnqueue(i) {
 			runtime.Gosched()
 		}
-		chunk = next
+		i = next
 	}
 }
 
-func (c *cache) read(e *entryHeader, dst []byte) []byte {
+func (c *cache) read(i int, e *entry, dst []byte) []byte {
 	size := e.size
 	if cap(dst) < size {
 		dst = make([]byte, size)
@@ -343,58 +365,41 @@ func (c *cache) read(e *entryHeader, dst []byte) []byte {
 
 	slots := cost(c.slotSize, size)
 
-	slot := unsafe.Pointer(e)
-	if slot == nil {
-		// Corruption
-		return nil
-	}
-
-	buf := unsafe.Slice(
-		(*byte)(unsafe.Add(slot, entryHeaderSize)),
-		min(c.slotSize-entryHeaderSize, size),
-	)
-
-	offset := copy(dst, buf)
-
-	slot = unsafe.Pointer(e.next.Load())
-	for range slots - 1 {
-		if slot == nil {
-			// Corruption happened, returning nil
-			return nil
-		}
-
-		buf := unsafe.Slice(
-			(*byte)(unsafe.Add(slot, nextHeaderSize)),
-			c.slotSize-nextHeaderSize,
-		)
+	var offset, next int
+	for range slots {
+		next = int(e.next.Load())
+		e = &c.entries[next]
 		offset += copy(
 			dst[offset:],
-			buf,
+			c.slice(i),
 		)
-
-		h := (*nextHeader)(slot)
-		slot = unsafe.Pointer(h.next.Load())
+		i = next
 	}
 
 	return dst
 }
 
 func (c *cache) Clear() {
-	c.hashmap = newMap[*entryHeader](c.slotCount)
-	c.alloc.Clear()
-	c.m = newEntryQueue(int(c.m.fifo.cap), c.slotSize)
-	c.s = newEntryQueue(int(c.s.fifo.cap), c.slotSize)
-	c.g = newGhost(int(c.m.fifo.cap))
-	c.entries.Store(0)
+	c.m = newQueue[int](int(c.m.cap))
+	c.s = newQueue[int](int(c.s.cap))
+	c.g = newGhost(c.g.cap)
+	c.alloc = newQueue[int](c.slotCap)
+	c.hashmap = newMap[int](c.slotCap)
+
+	for i := range c.slotCap {
+		if !c.alloc.TryEnqueue(i) {
+			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
+		}
+	}
 }
 
 func (c *cache) Close() error {
 	c.closed.Store(true)
-	return c.alloc.Close()
+	return nil
 }
 
 func (c *cache) Entries() uint64 {
-	return c.entries.Load()
+	return c.entriesCount.Load()
 }
 
 func (c *cache) Size() uint64 {
@@ -402,23 +407,23 @@ func (c *cache) Size() uint64 {
 }
 
 func (c *cache) Capacity() uint64 {
-	return uint64(c.slotCount * c.slotSize)
+	return uint64(c.slotCap * c.slotSize)
 }
 
 func (c *cache) MQueueCapacity() uint64 {
-	return c.m.fifo.cap
+	return c.m.cap
 }
 
 func (c *cache) MQueueEntries() uint64 {
-	return uint64(c.m.cost.Load())
+	return uint64(c.mSize.Load())
 }
 
 func (c *cache) SQueueCapacity() uint64 {
-	return c.s.fifo.cap
+	return c.s.cap
 }
 
 func (c *cache) SQueueEntries() uint64 {
-	return uint64(c.s.cost.Load())
+	return uint64(c.sSize.Load())
 }
 
 func (c *cache) Serialize(w io.Writer) error {
@@ -430,7 +435,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	}
 
 	plain := make(map[uint64][]byte)
-	c.hashmap.Range(func(k uint64, v *entryHeader) bool {
+	c.hashmap.Range(func(k uint64, v int) bool {
 		plain[k] = c.get(k, nil)
 		return true
 	})
@@ -438,12 +443,16 @@ func (c *cache) Serialize(w io.Writer) error {
 	return e.Encode(plain)
 }
 
+// Deserialize deserializes the cache from a byte stream.
+// Refer to the New method for the usage of slotSize & slotCount arguments.
 func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
 	mCapacity, sCapacity := defaultEx(slotCount)
 	return DeserializeEx(r, slotSize, mCapacity, sCapacity)
 }
 
-func DeserializeEx(r io.Reader, slotSize, mCapacity, sCapacity int) (Cache, error) {
+// DeserializeEx deserializes the cache from a byte stream.
+// Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
+func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 	d := gob.NewDecoder(r)
 
 	var rawSeed uint64
@@ -458,7 +467,7 @@ func DeserializeEx(r io.Reader, slotSize, mCapacity, sCapacity int) (Cache, erro
 		return nil, err
 	}
 
-	c := NewEx(slotSize, mCapacity, sCapacity).(*cache)
+	c := NewEx(slotSize, mCap, sCap).(*cache)
 	c.seed = seed
 
 	for k, v := range plain {
@@ -472,6 +481,7 @@ func DeserializeEx(r io.Reader, slotSize, mCapacity, sCapacity int) (Cache, erro
 	return c, nil
 }
 
+// SaveToFile serializes the cache as a file in the provided path.
 func SaveToFile(c Cache, path string) error {
 	file, err := os.Create(path)
 	if err != nil {
@@ -485,18 +495,22 @@ func SaveToFile(c Cache, path string) error {
 	return file.Close()
 }
 
+// LoadFromFile deserializes the cache from the file at the provided path.
+// Refer to the New method for the usage of slotSize & slotCount arguments.
 func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
-	mCapacity, sCapacity := defaultEx(slotCount)
-	return LoadFromFileEx(path, slotSize, mCapacity, sCapacity)
+	mCap, sCap := defaultEx(slotCount)
+	return LoadFromFileEx(path, slotSize, mCap, sCap)
 }
 
-func LoadFromFileEx(path string, slotSize, mCapacity, sCapacity int) (Cache, error) {
+// LoadFromFile deserializes the cache from the file at the provided path.
+// Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
+func LoadFromFileEx(path string, slotSize, mCap, sCap int) (Cache, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
-	cache, err := DeserializeEx(file, slotSize, mCapacity, sCapacity)
+	cache, err := DeserializeEx(file, slotSize, mCap, sCap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize to file: %w", err)
 	}

@@ -16,25 +16,14 @@ package otto_test
 
 import (
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"net/http"
-	_ "net/http/pprof"
-
 	"github.com/notfilippo/otto"
 )
-
-func TestMain(m *testing.M) {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-	m.Run()
-}
 
 type zipfs struct {
 	s    float64
@@ -50,7 +39,7 @@ func TestHitRatio(t *testing.T) {
 	}
 
 	sizes := []int{100, 500, 1000, 5000}
-	concurrency := []int{1, 2, 4, 8, 16, 32, 64}
+	concurrency := []int{64, 32, 16, 8, 4, 2, 1}
 
 	keySpace := uint64(10000)
 

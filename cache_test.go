@@ -32,7 +32,7 @@ func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int) Cache {
 }
 
 var (
-	testSlotSize  = alignToEntry(16 + entryHeaderSize)
+	testSlotSize  = 16
 	testMCapacity = 90
 	testSCapacity = 10
 )
@@ -46,13 +46,12 @@ func key(i int) string {
 }
 
 func value(tb testing.TB, i int, slots int) []byte {
-	totalSlotsSize := slots * testSlotSize
-	totalValueSize := totalSlotsSize - entryHeaderSize - (nextHeaderSize * (slots - 1))
+	size := slots * testSlotSize
 	single := fmt.Appendf(nil, "value-%d", i)
-	if len(single) > totalValueSize {
-		tb.Fatalf("value-%d is too long, max is %d", i, totalValueSize)
+	if len(single) > size {
+		tb.Fatalf("value-%d is too long, max is %d", i, size)
 	}
-	buf := make([]byte, totalValueSize)
+	buf := make([]byte, size)
 	for i := range buf {
 		buf[i] = single[i%len(single)]
 	}

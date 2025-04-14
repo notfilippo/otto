@@ -58,13 +58,13 @@ type slot[T any] struct {
 
 // newQueue creates a new Queue instance with the given
 // capacity.
-func newQueue[T any](capacity int) *queue[T] {
-	if capacity < 1 {
+func newQueue[T any](cap int) *queue[T] {
+	if cap < 1 {
 		panic("capacity must be positive number")
 	}
 	return &queue[T]{
-		cap:   uint64(capacity),
-		slots: make([]slotPadded[T], capacity),
+		cap:   uint64(cap),
+		slots: make([]slotPadded[T], cap),
 	}
 }
 

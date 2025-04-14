@@ -30,6 +30,8 @@ func newGhost(cap int) *ghost {
 }
 
 func (g *ghost) Add(hash uint64) {
+	g.hashmap.Store(hash, struct{}{})
+
 	for !g.fifo.TryEnqueue(hash) {
 		e, ok := g.fifo.TryDequeue()
 		if ok {
@@ -38,8 +40,6 @@ func (g *ghost) Add(hash uint64) {
 			}
 		}
 	}
-
-	g.hashmap.Store(hash, struct{}{})
 }
 
 func (g *ghost) In(hash uint64) bool {
