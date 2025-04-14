@@ -16,7 +16,7 @@ package otto
 
 type ghost struct {
 	fifo    *queue[uint64]
-	hashmap *hmap
+	hashmap *hmap[struct{}]
 
 	cap int
 }
@@ -24,20 +24,22 @@ type ghost struct {
 func newGhost(cap int) *ghost {
 	return &ghost{
 		fifo:    newQueue[uint64](cap),
-		hashmap: newMap(cap),
+		hashmap: newMap[struct{}](cap),
 		cap:     cap,
 	}
 }
 
 func (g *ghost) Add(hash uint64) {
-	g.hashmap.Store(hash, nil)
-
 	for !g.fifo.TryEnqueue(hash) {
 		e, ok := g.fifo.TryDequeue()
 		if ok {
-			g.hashmap.Delete(e)
+			if _, ok := g.hashmap.LoadAndDelete(e); !ok {
+				panic("otto: invariant violated: ghost entry dequeued but not found")
+			}
 		}
 	}
+
+	g.hashmap.Store(hash, struct{}{})
 }
 
 func (g *ghost) In(hash uint64) bool {

@@ -92,7 +92,7 @@ type cache struct {
 	alloc   *allocator
 	m, s    *entryQueue
 	g       *ghost
-	hashmap *hmap
+	hashmap *hmap[*entryHeader]
 
 	seed                maphash.Seed
 	slotSize, slotCount int
@@ -131,7 +131,7 @@ func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 		m:         newEntryQueue(mCapacity, slotSize),
 		s:         newEntryQueue(sCapacity, slotSize),
 		g:         newGhost(mCapacity),
-		hashmap:   newMap(slotCount),
+		hashmap:   newMap[*entryHeader](slotCount),
 		seed:      maphash.MakeSeed(),
 		slotSize:  slotSize,
 		slotCount: slotCount,
@@ -380,13 +380,11 @@ func (c *cache) read(e *entryHeader, dst []byte) []byte {
 }
 
 func (c *cache) Clear() {
-	mCap := (c.slotCount * 90) / 100
-	sCap := c.slotCount - mCap
-	c.hashmap = newMap(c.slotCount)
+	c.hashmap = newMap[*entryHeader](c.slotCount)
 	c.alloc.Clear()
-	c.m = newEntryQueue(mCap, c.slotSize)
-	c.s = newEntryQueue(sCap, c.slotSize)
-	c.g = newGhost(mCap)
+	c.m = newEntryQueue(int(c.m.fifo.cap), c.slotSize)
+	c.s = newEntryQueue(int(c.s.fifo.cap), c.slotSize)
+	c.g = newGhost(int(c.m.fifo.cap))
 	c.entries.Store(0)
 }
 
