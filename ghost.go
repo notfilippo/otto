@@ -35,9 +35,7 @@ func (g *ghost) Add(hash uint64) {
 	for !g.fifo.TryEnqueue(hash) {
 		e, ok := g.fifo.TryDequeue()
 		if ok {
-			if _, ok := g.hashmap.LoadAndDelete(e); !ok {
-				panic("otto: invariant violated: ghost entry dequeued but not found")
-			}
+			g.hashmap.Delete(e)
 		}
 	}
 }

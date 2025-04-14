@@ -35,10 +35,6 @@ type entry struct {
 	size int
 }
 
-const (
-	entryHeaderSize = int(unsafe.Sizeof(entry{}))
-)
-
 func cost(slotSize, entrySize int) int {
 	return (entrySize + slotSize - 1) / slotSize
 }
