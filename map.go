@@ -19,11 +19,6 @@ import (
 	"sync"
 )
 
-const (
-	// Default number of shards. Power of 2 for faster modulo.
-	defaultShardCount = 256
-)
-
 // shard represents a single partition of the map.
 type shard[T any] struct {
 	sync.RWMutex
@@ -33,18 +28,17 @@ type shard[T any] struct {
 // hmap is a sharded concurrent map from uint64 to T.
 // It uses multiple shards, each protected by a RWMutex, to reduce lock contention.
 type hmap[T any] struct {
-	shards     []shard[T]
-	shardCount uint64 // Must be power of 2
-	shardMask  uint64 // shardCount - 1
+	shards []shard[T]
 }
 
+var (
+	shardCount = int(nextPowOf2(32 * parallelism()))
+	shardMask  = uint64(shardCount - 1)
+)
+
 func newMap[T any](sizeHint int) *hmap[T] {
-	shardCount := defaultShardCount // TODO: maybe make this configurable
-	shardCount = int(nextPowOf2(uint32(shardCount)))
 	m := &hmap[T]{
-		shards:     make([]shard[T], shardCount),
-		shardCount: uint64(shardCount),
-		shardMask:  uint64(shardCount - 1),
+		shards: make([]shard[T], shardCount),
 	}
 
 	for i := range m.shards {
@@ -56,7 +50,7 @@ func newMap[T any](sizeHint int) *hmap[T] {
 
 // getShard returns the specific shard for a given key hash.
 func (m *hmap[T]) getShard(hash uint64) *shard[T] {
-	return &m.shards[hash&m.shardMask]
+	return &m.shards[hash&shardMask]
 }
 
 // Load returns the value stored in the map for a key hash, or nil if no
@@ -158,21 +152,4 @@ func (m *hmap[T]) Size() int {
 		s.RUnlock()
 	}
 	return totalSize
-}
-
-// nextPowOf2 computes the next highest power of 2 of 32-bit v.
-// Source: https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-// Kept for use in withShardCount option.
-func nextPowOf2(v uint32) uint32 {
-	if v == 0 {
-		return 1 // Or handle as error/default case depending on requirement
-	}
-	v--
-	v |= v >> 1
-	v |= v >> 2
-	v |= v >> 4
-	v |= v >> 8
-	v |= v >> 16
-	v++
-	return v
 }

@@ -92,15 +92,19 @@ type cache struct {
 	data []byte
 
 	entries []entry
+	freq    []atomic.Int32
+	access  []atomic.Int32
+	next    []atomic.Int64
 
 	m, s *queue[int]
 	g    *ghost
 
-	alloc   *queue[int]
-	hashmap *hmap[int]
+	alloc *queue[int]
+	hmap  *hmap[int]
 
 	seed              maphash.Seed
 	slotSize, slotCap int
+	mCap, sCap        int
 
 	// Stats
 	entriesCount atomic.Uint64
@@ -110,9 +114,9 @@ type cache struct {
 // New creates a new otto.Cache with a fixed size of slotSize * slotCount. Calling the
 // Set method on a full cache will cause elements to be evicted according to the
 // S3-FIFO algorithm.
-func New(slotSize, slotCount int) Cache {
-	mCapacity, sCapacity := defaultEx(slotCount)
-	return NewEx(slotSize, mCapacity, sCapacity)
+func New(slotSize, slotCap int) Cache {
+	mCap, sCap := defaultEx(slotCap)
+	return NewEx(slotSize, mCap, sCap)
 }
 
 const (
@@ -140,18 +144,23 @@ func NewEx(slotSize, mCap, sCap int) Cache {
 		}
 	}
 
-	return &cache{
+	c := &cache{
 		data:     make([]byte, slotCap*slotSize),
 		entries:  make([]entry, slotCap),
-		m:        newQueue[int](mCap),
-		s:        newQueue[int](sCap),
-		g:        newGhost(mCap),
-		alloc:    alloc,
-		hashmap:  newMap[int](slotCap),
+		freq:     make([]atomic.Int32, slotCap),
+		access:   make([]atomic.Int32, slotCap),
+		next:     make([]atomic.Int64, slotCap),
 		seed:     maphash.MakeSeed(),
 		slotSize: slotSize,
 		slotCap:  slotCap,
+		mCap:     mCap,
+		sCap:     sCap,
 	}
+
+	// Clear (re)initializes the cache policy structures.
+	c.Clear()
+
+	return c
 }
 
 func (c *cache) slice(i int) []byte {
@@ -169,7 +178,7 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	if _, ok := c.hashmap.LoadOrStore(hash, -1); ok {
+	if _, ok := c.hmap.LoadOrStore(hash, -1); ok {
 		// Already in the cache and we don't support updates
 		return
 	}
@@ -191,7 +200,7 @@ func (c *cache) set(hash uint64, val []byte) {
 		if first == -1 {
 			first = i
 		} else {
-			c.entries[prev].next.Store(int64(i))
+			c.next[prev].Store(int64(i))
 		}
 
 		offset += copy(c.slice(i), val[offset:])
@@ -203,12 +212,12 @@ func (c *cache) set(hash uint64, val []byte) {
 	e := &c.entries[first]
 	e.hash = hash
 	e.size = size
-	e.frequency.Store(0)
-	e.access.Store(0)
+	c.freq[first].Store(0)
+	c.access[first].Store(0)
 
 	c.memoryUsed.Add(int64(size))
 
-	c.hashmap.Store(hash, first)
+	c.hmap.Store(hash, first)
 	c.entriesCount.Add(1)
 
 	if c.g.In(hash) {
@@ -235,32 +244,32 @@ func (c *cache) Get(key string, dst []byte) []byte {
 }
 
 func (c *cache) get(hash uint64, dst []byte) []byte {
-	i, ok := c.hashmap.Load(hash)
+	i, ok := c.hmap.Load(hash)
 	if !ok || i == -1 {
 		return nil
 	}
 
 	e := &c.entries[i]
 
-	if e.access.Add(1) < 0 {
-		e.access.Store(math.MinInt32)
+	if c.access[i].Add(1) < 0 {
+		c.access[i].Store(math.MinInt32)
 		return nil
 	}
 
 	for {
-		freq := e.frequency.Load()
+		freq := c.freq[i].Load()
 		if freq == 3 {
 			break
 		}
 
-		if e.frequency.CompareAndSwap(freq, min(freq+1, 3)) {
+		if c.freq[i].CompareAndSwap(freq, min(freq+1, 3)) {
 			break
 		}
 	}
 
 	dst = c.read(i, e, dst)
 
-	e.access.Add(-1)
+	c.access[i].Add(-1)
 
 	return dst
 }
@@ -285,7 +294,7 @@ func (c *cache) evictS() {
 		// frequency 0 is concurrently accessed as the eviction runs
 		// it will have a frequency of 1 and it will still get promoted
 		// to the m-queue.
-		if e.frequency.Load() <= 1 && e.access.CompareAndSwap(0, math.MinInt32) {
+		if c.freq[i].Load() <= 1 && c.access[i].CompareAndSwap(0, math.MinInt32) {
 			c.g.Add(e.hash)
 			c.evictEntry(i, e)
 			return
@@ -308,15 +317,15 @@ func (c *cache) evictM() {
 
 		c.mSize.Add(-slots)
 
-		if e.frequency.Load() <= 0 && e.access.CompareAndSwap(0, math.MinInt32) {
+		if c.freq[i].Load() <= 0 && c.access[i].CompareAndSwap(0, math.MinInt32) {
 			c.evictEntry(i, e)
 			return
 		}
 
 		for {
-			freq := e.frequency.Load()
+			freq := c.freq[i].Load()
 
-			if e.frequency.CompareAndSwap(freq, max(0, freq-1)) {
+			if c.freq[i].CompareAndSwap(freq, max(0, freq-1)) {
 				for !c.m.TryEnqueue(i) {
 					c.evictM()
 				}
@@ -331,7 +340,7 @@ func (c *cache) evictM() {
 }
 
 func (c *cache) evictEntry(i int, e *entry) {
-	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || prev != i {
+	if prev, ok := c.hmap.LoadAndDelete(e.hash); !ok || i != prev {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
@@ -346,8 +355,7 @@ func (c *cache) evictEntry(i int, e *entry) {
 
 	var next int
 	for range slots {
-		next = int(e.next.Load())
-		e = &c.entries[next]
+		next = int(c.next[i].Load())
 		for !c.alloc.TryEnqueue(i) {
 			runtime.Gosched()
 		}
@@ -367,8 +375,7 @@ func (c *cache) read(i int, e *entry, dst []byte) []byte {
 
 	var offset, next int
 	for range slots {
-		next = int(e.next.Load())
-		e = &c.entries[next]
+		next = int(c.next[i].Load())
 		offset += copy(
 			dst[offset:],
 			c.slice(i),
@@ -380,11 +387,11 @@ func (c *cache) read(i int, e *entry, dst []byte) []byte {
 }
 
 func (c *cache) Clear() {
-	c.m = newQueue[int](int(c.m.cap))
-	c.s = newQueue[int](int(c.s.cap))
-	c.g = newGhost(c.g.cap)
+	c.m = newQueue[int](c.mCap)
+	c.s = newQueue[int](c.sCap)
+	c.g = newGhost(c.mCap)
 	c.alloc = newQueue[int](c.slotCap)
-	c.hashmap = newMap[int](c.slotCap)
+	c.hmap = newMap[int](c.slotCap)
 
 	for i := range c.slotCap {
 		if !c.alloc.TryEnqueue(i) {
@@ -435,7 +442,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	}
 
 	plain := make(map[uint64][]byte)
-	c.hashmap.Range(func(k uint64, v int) bool {
+	c.hmap.Range(func(k uint64, v int) bool {
 		plain[k] = c.get(k, nil)
 		return true
 	})

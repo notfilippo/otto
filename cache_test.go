@@ -33,8 +33,8 @@ func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int) Cache {
 
 var (
 	testSlotSize  = 16
-	testMCapacity = 90
-	testSCapacity = 10
+	testMCapacity = 9000
+	testSCapacity = 1000
 )
 
 func defaultCache(tb testing.TB) Cache {

@@ -14,23 +14,7 @@
 
 package otto
 
-import (
-	"sync/atomic"
-	"unsafe"
-)
-
 type entry struct {
-	frequency atomic.Int32
-	//lint:ignore U1000 prevents false sharing
-	fpad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
-
-	access atomic.Int32
-	//lint:ignore U1000 prevents false sharing
-	apad [cacheLineSize - unsafe.Sizeof(atomic.Int32{})]byte
-
-	next atomic.Int64
-	// next should be padded enough by hash & size
-
 	hash uint64
 	size int
 }
