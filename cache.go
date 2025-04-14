@@ -163,7 +163,7 @@ func (c *cache) set(hash uint64, val []byte) {
 
 	var (
 		e      *entryHeader
-		prev   **byte
+		prev   *atomic.Pointer[byte]
 		offset int
 	)
 
@@ -172,9 +172,7 @@ func (c *cache) set(hash uint64, val []byte) {
 		if prev != nil {
 			// Other bytes buffer
 			h := (*nextHeader)(unsafe.Pointer(b))
-			h.next = nil
-
-			*prev = b
+			prev.Store(b)
 			prev = &h.next
 			offset += copy(
 				buf[nextHeaderSize:],
@@ -183,8 +181,6 @@ func (c *cache) set(hash uint64, val []byte) {
 		} else {
 			// First byte buffer
 			e = (*entryHeader)(unsafe.Pointer(b))
-			e.next = nil
-
 			prev = &e.next
 			offset += copy(
 				buf[entryHeaderSize:],
@@ -326,10 +322,10 @@ func (c *cache) evictEntry(e *entryHeader) {
 		runtime.Goexit()
 	}
 
-	chunk = e.next
+	chunk = e.next.Load()
 	for range slots - 1 {
 		e := (*nextHeader)(unsafe.Pointer(chunk))
-		next := e.next
+		next := e.next.Load()
 		for !c.alloc.Free(chunk) {
 			runtime.Gosched()
 		}
@@ -360,7 +356,7 @@ func (c *cache) read(e *entryHeader, dst []byte) []byte {
 
 	offset := copy(dst, buf)
 
-	slot = unsafe.Pointer(e.next)
+	slot = unsafe.Pointer(e.next.Load())
 	for range slots - 1 {
 		if slot == nil {
 			// Corruption happened, returning nil
@@ -377,7 +373,7 @@ func (c *cache) read(e *entryHeader, dst []byte) []byte {
 		)
 
 		h := (*nextHeader)(slot)
-		slot = unsafe.Pointer(h.next)
+		slot = unsafe.Pointer(h.next.Load())
 	}
 
 	return dst
