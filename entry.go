@@ -31,11 +31,11 @@ type entryHeader struct {
 	hash uint64
 	size int
 
-	next unsafe.Pointer
+	next *byte
 }
 
 type nextHeader struct {
-	next unsafe.Pointer
+	next *byte
 }
 
 const (

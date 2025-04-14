@@ -50,7 +50,7 @@ func TestHitRatio(t *testing.T) {
 	}
 
 	sizes := []int{100, 500, 1000, 5000}
-	concurrency := []int{1, 2, 4, 8, 16, 32}
+	concurrency := []int{64, 1, 2, 4, 8, 16, 32}
 
 	keySpace := uint64(10000)
 

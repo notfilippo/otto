@@ -16,7 +16,6 @@ package otto
 
 import (
 	"fmt"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -27,7 +26,7 @@ type allocator struct {
 	slotSize  int
 	slotCount int
 
-	fifo *queue[unsafe.Pointer]
+	fifo *queue[*byte]
 }
 
 func newAllocator(slotSize, slotCount int) *allocator {
@@ -41,7 +40,7 @@ func newAllocator(slotSize, slotCount int) *allocator {
 		arena:     arena,
 		slotSize:  slotSize,
 		slotCount: slotCount,
-		fifo:      newQueue[unsafe.Pointer](slotCount),
+		fifo:      newQueue[*byte](slotCount),
 	}
 
 	a.Clear()
@@ -49,11 +48,11 @@ func newAllocator(slotSize, slotCount int) *allocator {
 	return a
 }
 
-func (a *allocator) Alloc(slots int, yield func(unsafe.Pointer)) bool {
+func (a *allocator) Alloc(slots int, yield func(*byte)) bool {
 	return a.fifo.TryDequeueBatch(slots, yield)
 }
 
-func (a *allocator) Free(slot unsafe.Pointer) bool {
+func (a *allocator) Free(slot *byte) bool {
 	return a.fifo.TryEnqueue(slot)
 }
 
@@ -65,7 +64,7 @@ func (a *allocator) Clear() {
 	}
 
 	for i := range a.slotCount {
-		if !a.fifo.TryEnqueue(unsafe.Pointer(&a.arena[i*a.slotSize : (i+1)*a.slotSize][0])) {
+		if !a.fifo.TryEnqueue(&a.arena[i*a.slotSize : (i+1)*a.slotSize][0]) {
 			panic("otto: allocator: failed to clear")
 		}
 	}
