@@ -24,7 +24,7 @@ type ghost struct {
 func newGhost(cap int) *ghost {
 	return &ghost{
 		fifo:    newQueue[uint64](cap),
-		hashmap: newMap(withPresize(cap)),
+		hashmap: newMap(cap),
 		cap:     cap,
 	}
 }

@@ -15,14 +15,11 @@
 package otto
 
 import (
-	"fmt"
-
-	"golang.org/x/sys/unix"
+	"unsafe"
 )
 
 type allocator struct {
-	arena []byte
-
+	arena     []byte
 	slotSize  int
 	slotCount int
 
@@ -31,10 +28,7 @@ type allocator struct {
 
 func newAllocator(slotSize, slotCount int) *allocator {
 	arenaSize := slotSize * slotCount
-	arena, err := unix.Mmap(-1, 0, arenaSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
-	if err != nil {
-		panic(fmt.Errorf("cannot allocate %d (slotSize) * %d (slotCount) = %d bytes via mmap: %s", slotSize, slotCount, arenaSize, err))
-	}
+	arena := make([]byte, arenaSize)
 
 	a := &allocator{
 		arena:     arena,
@@ -49,10 +43,27 @@ func newAllocator(slotSize, slotCount int) *allocator {
 }
 
 func (a *allocator) Alloc(slots int, yield func(*byte)) bool {
-	return a.fifo.TryDequeueBatch(slots, yield)
+	return a.fifo.TryDequeueBatch(slots, func(b *byte) {
+		arenaPtr := uintptr(unsafe.Pointer(&a.arena[0]))
+		slotPtr := uintptr(unsafe.Pointer(b))
+		slotSize := uintptr(a.slotSize)
+		offset := slotPtr - arenaPtr
+		if slotPtr < arenaPtr || offset%slotSize != 0 {
+			panic("otto: inviariant violated: unaligned alloc")
+		}
+
+		yield(b)
+	})
 }
 
 func (a *allocator) Free(slot *byte) bool {
+	arenaPtr := uintptr(unsafe.Pointer(&a.arena[0]))
+	slotPtr := uintptr(unsafe.Pointer(slot))
+	slotSize := uintptr(a.slotSize)
+	offset := slotPtr - arenaPtr
+	if slotPtr < arenaPtr || offset%slotSize != 0 {
+		panic("otto: inviariant violated: unaligned free")
+	}
 	return a.fifo.TryEnqueue(slot)
 }
 
@@ -71,5 +82,5 @@ func (a *allocator) Clear() {
 }
 
 func (a *allocator) Close() error {
-	return unix.Munmap(a.arena)
+	return nil
 }

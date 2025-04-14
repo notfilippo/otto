@@ -131,7 +131,7 @@ func NewEx(slotSize, mCapacity, sCapacity int) Cache {
 		m:         newEntryQueue(mCapacity, slotSize),
 		s:         newEntryQueue(sCapacity, slotSize),
 		g:         newGhost(mCapacity),
-		hashmap:   newMap(withPresize(slotCount)),
+		hashmap:   newMap(slotCount),
 		seed:      maphash.MakeSeed(),
 		slotSize:  slotSize,
 		slotCount: slotCount,
@@ -382,7 +382,7 @@ func (c *cache) read(e *entryHeader, dst []byte) []byte {
 func (c *cache) Clear() {
 	mCap := (c.slotCount * 90) / 100
 	sCap := c.slotCount - mCap
-	c.hashmap = newMap(withPresize(c.slotCount))
+	c.hashmap = newMap(c.slotCount)
 	c.alloc.Clear()
 	c.m = newEntryQueue(mCap, c.slotSize)
 	c.s = newEntryQueue(sCap, c.slotSize)
