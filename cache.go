@@ -91,14 +91,17 @@ type cache struct {
 
 	data []byte
 
+	// Metadata
 	entries []entry
 	freq    []atomic.Int32
 	access  []atomic.Int32
 	next    []atomic.Int64
 
+	// Policy
 	m, s *queue[int]
 	g    *ghost
 
+	// Storage
 	alloc *queue[int]
 	hmap  *hmap[int]
 
@@ -137,12 +140,6 @@ func defaultEx(slotCount int) (mCapacity, sCapacity int) {
 // learn more about S3-FIFO visit https://s3fifo.com/
 func NewEx(slotSize, mCap, sCap int) Cache {
 	slotCap := mCap + sCap
-	alloc := newQueue[int](slotCap)
-	for i := range slotCap {
-		if !alloc.TryEnqueue(i) {
-			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
-		}
-	}
 
 	c := &cache{
 		data:     make([]byte, slotCap*slotSize),
@@ -157,7 +154,7 @@ func NewEx(slotSize, mCap, sCap int) Cache {
 		sCap:     sCap,
 	}
 
-	// Clear (re)initializes the cache policy structures.
+	// Clear initializes the cache policy structures.
 	c.Clear()
 
 	return c
@@ -239,7 +236,6 @@ func (c *cache) Get(key string, dst []byte) []byte {
 	}
 
 	hash := maphash.String(c.seed, key)
-
 	return c.get(hash, dst)
 }
 
