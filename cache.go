@@ -15,6 +15,7 @@
 package otto
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"hash/maphash"
@@ -22,6 +23,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -92,26 +94,24 @@ type cache struct {
 	data []byte
 
 	// Metadata
-	entries []entry
-	freq    []atomic.Int32
-	access  []atomic.Int32
-	next    []atomic.Int64
+	pool sync.Pool
 
 	// Policy
-	m, s *queue[int]
+	m, s *queue[*entry]
 	g    *ghost
 
 	// Storage
 	alloc *queue[int]
-	hmap  *hmap[int]
+	hmap  *hmap[*entry]
 
 	seed              maphash.Seed
 	slotSize, slotCap int
 	mCap, sCap        int
 
 	// Stats
-	entriesCount atomic.Uint64
-	memoryUsed   atomic.Int64
+	memoryUsed atomic.Uint64
+	//lint:ignore U1000 prevents false sharing
+	mupad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
 }
 
 // New creates a new otto.Cache with a fixed size of slotSize * slotCount. Calling the
@@ -143,19 +143,24 @@ func NewEx(slotSize, mCap, sCap int) Cache {
 
 	c := &cache{
 		data:     make([]byte, slotCap*slotSize),
-		entries:  make([]entry, slotCap),
-		freq:     make([]atomic.Int32, slotCap),
-		access:   make([]atomic.Int32, slotCap),
-		next:     make([]atomic.Int64, slotCap),
+		pool:     sync.Pool{New: func() any { return new(entry) }},
 		seed:     maphash.MakeSeed(),
+		m:        newQueue[*entry](mCap),
+		s:        newQueue[*entry](sCap),
+		g:        newGhost(mCap),
+		alloc:    newQueue[int](slotCap),
+		hmap:     newMap[*entry](slotCap),
 		slotSize: slotSize,
 		slotCap:  slotCap,
 		mCap:     mCap,
 		sCap:     sCap,
 	}
 
-	// Clear initializes the cache policy structures.
-	c.Clear()
+	for i := range c.slotCap {
+		if !c.alloc.TryEnqueue(i) {
+			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
+		}
+	}
 
 	return c
 }
@@ -175,7 +180,7 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	if _, ok := c.hmap.LoadOrStore(hash, -1); ok {
+	if _, ok := c.hmap.LoadOrStore(hash, nil); ok {
 		// Already in the cache and we don't support updates
 		return
 	}
@@ -197,33 +202,33 @@ func (c *cache) set(hash uint64, val []byte) {
 		if first == -1 {
 			first = i
 		} else {
-			c.next[prev].Store(int64(i))
+			binary.NativeEndian.PutUint64(c.slice(prev), uint64(i))
 		}
 
-		offset += copy(c.slice(i), val[offset:])
+		offset += copy(c.slice(i)[headerSize:], val[offset:])
 		prev = i
 	}) {
 		c.evict()
 	}
 
-	e := &c.entries[first]
+	e := c.pool.Get().(*entry)
 	e.hash = hash
 	e.size = size
-	c.freq[first].Store(0)
-	c.access[first].Store(0)
+	e.slot = first
+	e.freq.Store(0)
+	e.access.Store(0)
 
-	c.memoryUsed.Add(int64(size))
+	c.memoryUsed.Add(uint64(size))
 
-	c.hmap.Store(hash, first)
-	c.entriesCount.Add(1)
+	c.hmap.Store(hash, e)
 
 	if c.g.In(hash) {
-		for !c.m.TryEnqueue(first) {
+		for !c.m.TryEnqueue(e) {
 			c.evictM()
 		}
 		c.mSize.Add(int64(slots))
 	} else {
-		for !c.s.TryEnqueue(first) {
+		for !c.s.TryEnqueue(e) {
 			c.evictS()
 		}
 		c.sSize.Add(int64(slots))
@@ -240,32 +245,30 @@ func (c *cache) Get(key string, dst []byte) []byte {
 }
 
 func (c *cache) get(hash uint64, dst []byte) []byte {
-	i, ok := c.hmap.Load(hash)
-	if !ok || i == -1 {
+	e, ok := c.hmap.Load(hash)
+	if !ok || e == nil {
 		return nil
 	}
 
-	e := &c.entries[i]
-
-	if c.access[i].Add(1) < 0 {
-		c.access[i].Store(math.MinInt32)
+	if e.access.Add(1) < 0 {
+		e.access.Store(math.MinInt32)
 		return nil
 	}
 
 	for {
-		freq := c.freq[i].Load()
+		freq := e.freq.Load()
 		if freq == 3 {
 			break
 		}
 
-		if c.freq[i].CompareAndSwap(freq, min(freq+1, 3)) {
+		if e.freq.CompareAndSwap(freq, min(freq+1, 3)) {
 			break
 		}
 	}
 
-	dst = c.read(i, e, dst)
+	dst = c.read(e, dst)
 
-	c.access[i].Add(-1)
+	e.access.Add(-1)
 
 	return dst
 }
@@ -279,9 +282,8 @@ func (c *cache) evict() {
 }
 
 func (c *cache) evictS() {
-	i, ok := c.s.TryDequeue()
+	e, ok := c.s.TryDequeue()
 	for ok {
-		e := &c.entries[i]
 		slots := int64(cost(c.slotSize, e.size))
 
 		c.sSize.Add(-slots)
@@ -290,39 +292,38 @@ func (c *cache) evictS() {
 		// frequency 0 is concurrently accessed as the eviction runs
 		// it will have a frequency of 1 and it will still get promoted
 		// to the m-queue.
-		if c.freq[i].Load() <= 1 && c.access[i].CompareAndSwap(0, math.MinInt32) {
+		if e.freq.Load() <= 1 && e.access.CompareAndSwap(0, math.MinInt32) {
 			c.g.Add(e.hash)
-			c.evictEntry(i, e)
+			c.evictEntry(e)
 			return
 		}
 
-		for !c.m.TryEnqueue(i) {
+		for !c.m.TryEnqueue(e) {
 			c.evictM()
 		}
 		c.mSize.Add(slots)
 
-		i, ok = c.s.TryDequeue()
+		e, ok = c.s.TryDequeue()
 	}
 }
 
 func (c *cache) evictM() {
-	i, ok := c.m.TryDequeue()
+	e, ok := c.m.TryDequeue()
 	for ok {
-		e := &c.entries[i]
 		slots := int64(cost(c.slotSize, e.size))
 
 		c.mSize.Add(-slots)
 
-		if c.freq[i].Load() <= 0 && c.access[i].CompareAndSwap(0, math.MinInt32) {
-			c.evictEntry(i, e)
+		if e.freq.Load() <= 0 && e.access.CompareAndSwap(0, math.MinInt32) {
+			c.evictEntry(e)
 			return
 		}
 
 		for {
-			freq := c.freq[i].Load()
+			freq := e.freq.Load()
 
-			if c.freq[i].CompareAndSwap(freq, max(0, freq-1)) {
-				for !c.m.TryEnqueue(i) {
+			if e.freq.CompareAndSwap(freq, max(0, freq-1)) {
+				for !c.m.TryEnqueue(e) {
 					c.evictM()
 				}
 				c.mSize.Add(slots)
@@ -331,12 +332,12 @@ func (c *cache) evictM() {
 			}
 		}
 
-		i, ok = c.m.TryDequeue()
+		e, ok = c.m.TryDequeue()
 	}
 }
 
-func (c *cache) evictEntry(i int, e *entry) {
-	if prev, ok := c.hmap.LoadAndDelete(e.hash); !ok || i != prev {
+func (c *cache) evictEntry(e *entry) {
+	if prev, ok := c.hmap.LoadAndDelete(e.hash); !ok || e != prev {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
@@ -344,14 +345,16 @@ func (c *cache) evictEntry(i int, e *entry) {
 		panic("otto: invariant violated: entry with size zero")
 	}
 
+	c.memoryUsed.Add(^uint64(e.size - 1))
+
 	slots := cost(c.slotSize, e.size)
 
-	c.entriesCount.Add(^uint64(0))
-	c.memoryUsed.Add(-int64(e.size))
+	i := e.slot
+	c.pool.Put(e)
 
 	var next int
 	for range slots {
-		next = int(c.next[i].Load())
+		next = int(binary.NativeEndian.Uint64(c.slice(i)))
 		for !c.alloc.TryEnqueue(i) {
 			runtime.Gosched()
 		}
@@ -359,7 +362,7 @@ func (c *cache) evictEntry(i int, e *entry) {
 	}
 }
 
-func (c *cache) read(i int, e *entry, dst []byte) []byte {
+func (c *cache) read(e *entry, dst []byte) []byte {
 	size := e.size
 	if cap(dst) < size {
 		dst = make([]byte, size)
@@ -369,12 +372,14 @@ func (c *cache) read(i int, e *entry, dst []byte) []byte {
 
 	slots := cost(c.slotSize, size)
 
+	i := e.slot
+
 	var offset, next int
 	for range slots {
-		next = int(c.next[i].Load())
+		next = int(binary.NativeEndian.Uint64(c.slice(i)))
 		offset += copy(
 			dst[offset:],
-			c.slice(i),
+			c.slice(i)[headerSize:],
 		)
 		i = next
 	}
@@ -383,11 +388,31 @@ func (c *cache) read(i int, e *entry, dst []byte) []byte {
 }
 
 func (c *cache) Clear() {
-	c.m = newQueue[int](c.mCap)
-	c.s = newQueue[int](c.sCap)
-	c.g = newGhost(c.mCap)
-	c.alloc = newQueue[int](c.slotCap)
-	c.hmap = newMap[int](c.slotCap)
+	c.hmap.Clear()
+
+	for {
+		if e, ok := c.m.TryDequeue(); ok {
+			c.pool.Put(e)
+		} else {
+			break
+		}
+	}
+
+	for {
+		if e, ok := c.s.TryDequeue(); ok {
+			c.pool.Put(e)
+		} else {
+			break
+		}
+	}
+
+	c.g.Clear()
+
+	for {
+		if _, ok := c.alloc.TryDequeue(); !ok {
+			break
+		}
+	}
 
 	for i := range c.slotCap {
 		if !c.alloc.TryEnqueue(i) {
@@ -402,7 +427,7 @@ func (c *cache) Close() error {
 }
 
 func (c *cache) Entries() uint64 {
-	return c.entriesCount.Load()
+	return uint64(c.hmap.Size())
 }
 
 func (c *cache) Size() uint64 {
@@ -438,7 +463,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	}
 
 	plain := make(map[uint64][]byte)
-	c.hmap.Range(func(k uint64, v int) bool {
+	c.hmap.Range(func(k uint64, v *entry) bool {
 		plain[k] = c.get(k, nil)
 		return true
 	})

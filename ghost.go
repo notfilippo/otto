@@ -17,6 +17,7 @@ package otto
 type ghost struct {
 	fifo    *queue[uint64]
 	hashmap *hmap[struct{}]
+	striped *stripedHashBuffer
 
 	cap int
 }
@@ -25,18 +26,26 @@ func newGhost(cap int) *ghost {
 	return &ghost{
 		fifo:    newQueue[uint64](cap),
 		hashmap: newMap[struct{}](cap),
+		striped: newStripedHashBuffer(),
 		cap:     cap,
 	}
 }
 
 func (g *ghost) Add(hash uint64) {
-	g.hashmap.Store(hash, struct{}{})
+	result := g.striped.Add(hash)
+	if result != nil {
+		for _, hash := range result.Buffer {
+			g.hashmap.Store(hash, struct{}{})
 
-	for !g.fifo.TryEnqueue(hash) {
-		e, ok := g.fifo.TryDequeue()
-		if ok {
-			g.hashmap.Delete(e)
+			for !g.fifo.TryEnqueue(hash) {
+				e, ok := g.fifo.TryDequeue()
+				if ok {
+					g.hashmap.Delete(e)
+				}
+			}
 		}
+
+		g.striped.Free()
 	}
 }
 

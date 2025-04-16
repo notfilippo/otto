@@ -3,4 +3,5 @@
 # testing and benchmarking
 /mem
 /cpu
+/mutex
 /otto.test

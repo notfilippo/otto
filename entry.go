@@ -14,11 +14,19 @@
 
 package otto
 
+import "sync/atomic"
+
 type entry struct {
 	hash uint64
 	size int
+	slot int
+
+	freq   atomic.Int32
+	access atomic.Int32
 }
 
+const headerSize = 8 // a.k.a. sizeof(uint64)
+
 func cost(slotSize, entrySize int) int {
-	return (entrySize + slotSize - 1) / slotSize
+	return (entrySize + slotSize - headerSize - 1) / (slotSize - headerSize)
 }

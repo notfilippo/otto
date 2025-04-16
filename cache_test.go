@@ -16,7 +16,10 @@ package otto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"hash/maphash"
+	"math/rand/v2"
 	"sync/atomic"
 	"testing"
 )
@@ -45,22 +48,24 @@ func key(i int) string {
 	return fmt.Sprintf("key-%d", i)
 }
 
-func value(tb testing.TB, i int, slots int) []byte {
-	size := slots * testSlotSize
-	single := fmt.Appendf(nil, "value-%d", i)
-	if len(single) > size {
-		tb.Fatalf("value-%d is too long, max is %d", i, size)
-	}
+var seed = maphash.MakeSeed()
+
+func rng(i int) *rand.ChaCha8 {
+	init := [32]byte{}
+	binary.NativeEndian.PutUint64(init[:], uint64(i))
+	return rand.NewChaCha8(init)
+}
+
+func value(i int, slots int) []byte {
+	size := slots * (testSlotSize - 8)
 	buf := make([]byte, size)
-	for i := range buf {
-		buf[i] = single[i%len(single)]
-	}
+	rng(i).Read(buf)
 	return buf
 }
 
 // cacheSet is a shortcut to set a key in the cache.
-func cacheSet(tb testing.TB, cache Cache, i int, slots int) {
-	cache.Set(key(i), value(tb, i, slots))
+func cacheSet(_ testing.TB, cache Cache, i int, slots int) {
+	cache.Set(key(i), value(i, slots))
 }
 
 // cacheHit is a shortcut to check if a key is in the cache.
@@ -69,7 +74,7 @@ func cacheHit(tb testing.TB, cache Cache, i int, slots int) {
 	if v == nil {
 		tb.Fatalf("expected key-%d to be in cache", i)
 	}
-	expected := value(tb, i, slots)
+	expected := value(i, slots)
 	if !bytes.Equal(v, expected) {
 		tb.Fatalf("expected key-%d to have value %x instead found value %x", i, expected, v)
 	}
