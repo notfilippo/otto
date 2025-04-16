@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"hash/maphash"
 	"math/rand/v2"
 	"sync/atomic"
 	"testing"
@@ -47,8 +46,6 @@ func defaultCache(tb testing.TB) Cache {
 func key(i int) string {
 	return fmt.Sprintf("key-%d", i)
 }
-
-var seed = maphash.MakeSeed()
 
 func rng(i int) *rand.ChaCha8 {
 	init := [32]byte{}

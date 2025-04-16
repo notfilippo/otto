@@ -27,7 +27,7 @@ type stripedHashBuffer struct {
 }
 
 var (
-	stripedCapacity = uint64(nextPowOf2(32 * parallelism()))
+	stripedCapacity = uint64(nextPowOf2(parallelism()))
 	stripedMask     = stripedCapacity - 1
 )
 
