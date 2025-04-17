@@ -142,6 +142,42 @@ func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
 	return true
 }
 
+func (q *queue[T]) TryEnqueueBatch(n int, provide func() T) bool {
+	if n <= 0 {
+		return false
+	}
+
+	// Lad the head index
+	head := q.head.Load()
+
+	// Check if all n slots are ready for enqueuing
+	for i := range n {
+		idx := q.idx(head + uint64(i))
+		slot := &q.slots[idx]
+		turn := q.turn(head+uint64(i)) * 2
+		if slot.turn.Load() != turn {
+			return false // Not all slots are ready
+		}
+	}
+
+	// Try to atomically increment the head index by n
+	if !q.head.CompareAndSwap(head, head+uint64(n)) {
+		return false // Another consumer modified head
+	}
+
+	// Enqueue all n items
+	for i := range n {
+		idx := q.idx(head + uint64(i))
+		slot := &q.slots[idx]
+		turn := q.turn(head+uint64(i)) * 2
+
+		slot.item = provide()
+		slot.turn.Store(turn + 1)
+	}
+
+	return true
+}
+
 func (q *queue[T]) idx(i uint64) uint64 {
 	return i % q.cap
 }

@@ -25,8 +25,20 @@ type entry struct {
 	access atomic.Int32
 }
 
+// headerSize represents the size reserved at the start for each slot. That memory
+// area stores a native-endian uint64 representing the next block linked to the
+// current.
 const headerSize = 8 // a.k.a. sizeof(uint64)
 
+// newEntry creates a new entry as an any object. It is used in the
+// cache's sync.Pool to instantiate new entries.
+func newEntry() any {
+	return new(entry)
+}
+
+// cost returns the slots needed to fit an entry of `entrySize` in
+// a cache that has slots of `slotSize`. It takes into account the
+// header size, which is stored alongside the cached values.
 func cost(slotSize, entrySize int) int {
 	return (entrySize + slotSize - headerSize - 1) / (slotSize - headerSize)
 }

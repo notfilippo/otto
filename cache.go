@@ -79,6 +79,11 @@ type InternalStatsCache interface {
 var _ (InternalStatsCache) = (*cache)(nil)
 
 type cache struct {
+	// Stats
+	memoryUsed atomic.Uint64
+	//lint:ignore U1000 prevents false sharing
+	mupad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
+
 	closed atomic.Bool
 	//lint:ignore U1000 prevents false sharing
 	cpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
@@ -101,17 +106,12 @@ type cache struct {
 	g    *ghost
 
 	// Storage
-	alloc *queue[int]
-	hmap  *hmap[*entry]
+	alloc   *queue[int]
+	hashmap *hmap[*entry]
 
 	seed              maphash.Seed
 	slotSize, slotCap int
 	mCap, sCap        int
-
-	// Stats
-	memoryUsed atomic.Uint64
-	//lint:ignore U1000 prevents false sharing
-	mupad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
 }
 
 // New creates a new otto.Cache with a fixed size of slotSize * slotCount. Calling the
@@ -143,13 +143,13 @@ func NewEx(slotSize, mCap, sCap int) Cache {
 
 	c := &cache{
 		data:     make([]byte, slotCap*slotSize),
-		pool:     sync.Pool{New: func() any { return new(entry) }},
+		pool:     sync.Pool{New: newEntry},
 		seed:     maphash.MakeSeed(),
 		m:        newQueue[*entry](mCap),
 		s:        newQueue[*entry](sCap),
 		g:        newGhost(mCap),
 		alloc:    newQueue[int](slotCap),
-		hmap:     newMap[*entry](slotCap),
+		hashmap:  newMap[*entry](slotCap),
 		slotSize: slotSize,
 		slotCap:  slotCap,
 		mCap:     mCap,
@@ -180,7 +180,7 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	if _, ok := c.hmap.LoadOrStore(hash, nil); ok {
+	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
 		// Already in the cache and we don't support updates
 		return
 	}
@@ -220,7 +220,7 @@ func (c *cache) set(hash uint64, val []byte) {
 
 	c.memoryUsed.Add(uint64(size))
 
-	c.hmap.Store(hash, e)
+	c.hashmap.Store(hash, e)
 
 	if c.g.In(hash) {
 		for !c.m.TryEnqueue(e) {
@@ -245,7 +245,7 @@ func (c *cache) Get(key string, dst []byte) []byte {
 }
 
 func (c *cache) get(hash uint64, dst []byte) []byte {
-	e, ok := c.hmap.Load(hash)
+	e, ok := c.hashmap.Load(hash)
 	if !ok || e == nil {
 		return nil
 	}
@@ -337,7 +337,7 @@ func (c *cache) evictM() {
 }
 
 func (c *cache) evictEntry(e *entry) {
-	if prev, ok := c.hmap.LoadAndDelete(e.hash); !ok || e != prev {
+	if prev, ok := c.hashmap.LoadAndDelete(e.hash); !ok || e != prev {
 		panic("otto: invariant violated: entry already deleted")
 	}
 
@@ -349,16 +349,20 @@ func (c *cache) evictEntry(e *entry) {
 
 	slots := cost(c.slotSize, e.size)
 
-	i := e.slot
+	prev := e.slot
 	c.pool.Put(e)
 
-	var next int
+	var next, current int
+	for !c.alloc.TryEnqueueBatch(slots, func() int {
+		next = int(binary.NativeEndian.Uint64(c.slice(prev)))
+		current = prev
+		prev = next
+		return current
+	}) {
+		runtime.Gosched()
+	}
+
 	for range slots {
-		next = int(binary.NativeEndian.Uint64(c.slice(i)))
-		for !c.alloc.TryEnqueue(i) {
-			runtime.Gosched()
-		}
-		i = next
 	}
 }
 
@@ -388,7 +392,7 @@ func (c *cache) read(e *entry, dst []byte) []byte {
 }
 
 func (c *cache) Clear() {
-	c.hmap.Clear()
+	c.hashmap.Clear()
 
 	for {
 		if e, ok := c.m.TryDequeue(); ok {
@@ -427,7 +431,7 @@ func (c *cache) Close() error {
 }
 
 func (c *cache) Entries() uint64 {
-	return uint64(c.hmap.Size())
+	return uint64(c.hashmap.Size())
 }
 
 func (c *cache) Size() uint64 {
@@ -463,7 +467,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	}
 
 	plain := make(map[uint64][]byte)
-	c.hmap.Range(func(k uint64, v *entry) bool {
+	c.hashmap.Range(func(k uint64, v *entry) bool {
 		plain[k] = c.get(k, nil)
 		return true
 	})
