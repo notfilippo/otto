@@ -45,18 +45,31 @@ type Cache interface {
 	// Entries returns the number of entries currently stored in the cache.
 	Entries() uint64
 
+	// Capacity returns the theoretical capacity of the cache.
+	Capacity() uint64
+
 	// Serialize write the cache to a writer. The cache can then be
 	// reinstantiated using the otto.Deserialize function.
 	Serialize(w io.Writer) error
 }
 
 type cache struct {
-	seed   maphash.Seed
-	shards []shard
+	seed       maphash.Seed
+	shards     []shard
+	shardMask  uint32
+	shardSize  uint32
+	shardCount uint32
 }
 
-func New(shardSize, shardCount int) Cache {
-	arenaSize := shardSize * shardCount
+// New creates a new cache. The cache will immediately allocate
+// shardSize * shardCount bytes of memory.
+func New(shardSize, shardCount uint32) Cache {
+	if shardCount != nextPowOf2(shardCount) {
+		panic("shard size must be a power of 2")
+	}
+
+	arenaSize := int(shardSize) * int(shardCount)
+
 	arena, err := unix.Mmap(-1, 0, arenaSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
 	if err != nil {
 		panic(fmt.Errorf("cannot allocate %d shards of %d size = %d bytes via mmap: %w", shardCount, shardSize, arenaSize, err))
@@ -69,8 +82,11 @@ func New(shardSize, shardCount int) Cache {
 	}
 
 	return &cache{
-		seed:   maphash.MakeSeed(),
-		shards: shards,
+		seed:       maphash.MakeSeed(),
+		shards:     shards,
+		shardMask:  shardCount - 1,
+		shardSize:  shardSize,
+		shardCount: shardCount,
 	}
 }
 
@@ -86,12 +102,10 @@ func (c *cache) Set(key string, val []byte) {
 }
 
 func (c *cache) set(hash uint64, val []byte) {
-	index := int(hash % uint64(len(c.shards)))
-	shard := &c.shards[index]
+	shard := &c.shards[uint32(hash)&c.shardMask]
 
-	size := headerSize + len(val)
-
-	if size > len(shard.memory) {
+	size := uint32(headerSize + len(val))
+	if size > c.shardSize {
 		// Value is too big to fit in a shard.
 		return
 	}
@@ -99,36 +113,31 @@ func (c *cache) set(hash uint64, val []byte) {
 	shard.mu.Lock()
 
 	if _, ok := shard.entries[hash]; ok {
+		// Value is already stored in the cache.
 		shard.mu.Unlock()
 		return
 	}
 
-	var compact bool
-
-	if shard.hand+size > len(shard.memory) {
-		shard.gen = (shard.gen + 1) % 10
+	if shard.hand+size > c.shardSize {
+		shard.fold += 1
 		shard.hand = 0
-		compact = true
+
+		for k, e := range shard.entries {
+			fold := uint32(e)
+			if fold != shard.fold && fold != shard.fold-1 {
+				delete(shard.entries, k)
+			}
+		}
 	}
 
 	header := (*header)(unsafe.Pointer(&shard.memory[shard.hand]))
 	header.hash = hash
-	header.size = len(val)
-	copy(shard.memory[shard.hand+headerSize:], val)
+	header.size = uint32(len(val))
+	copy(shard.memory[shard.hand+headerOffset:], val)
 
-	shard.entries[hash] = entry{index: shard.hand, gen: shard.gen}
-
+	e := uint64(shard.hand)<<32 | uint64(shard.fold)
+	shard.entries[hash] = e
 	shard.hand += size
-
-	if compact {
-		entries := make(map[uint64]entry)
-		for i := range shard.entries {
-			if shard.entries[i].gen == shard.gen || shard.entries[i].gen == shard.gen-1 {
-				entries[i] = shard.entries[i]
-			}
-		}
-		shard.entries = entries
-	}
 
 	shard.mu.Unlock()
 }
@@ -139,32 +148,58 @@ func (c *cache) Get(key string, buf []byte) []byte {
 }
 
 func (c *cache) get(hash uint64, buf []byte) []byte {
-	shard := &c.shards[int(hash%uint64(len(c.shards)))]
+	shard := &c.shards[uint32(hash)&c.shardMask]
 
 	tok := shard.mu.RLock()
 
 	e, ok := shard.entries[hash]
-	if !ok || (e.index >= shard.hand && e.gen != shard.gen-1) || (e.index < shard.hand && e.gen != shard.gen) {
+	index := uint32(e >> 32)
+	fold := uint32(e)
+
+	if !ok || (index >= shard.hand && fold != shard.fold-1) || (index < shard.hand && fold != shard.fold) {
+		// Entry belongs to older fold.
 		shard.mu.RUnlock(tok)
 		return nil
 	}
 
-	header := (*header)(unsafe.Pointer(&shard.memory[e.index]))
+	header := (*header)(unsafe.Pointer(&shard.memory[index]))
 	if header.hash != hash {
-		// Corruption / Collision
+		// Corruption / collision.
 		shard.mu.RUnlock(tok)
 		return nil
 	}
 
-	if cap(buf) < header.size {
+	if uint32(cap(buf)) < header.size {
 		buf = make([]byte, header.size)
 	} else {
 		buf = buf[:header.size]
 	}
 
-	copy(buf, shard.memory[e.index+headerSize:])
+	copy(buf, shard.memory[index+headerOffset:])
 	shard.mu.RUnlock(tok)
 	return buf
+}
+
+func (c *cache) Clear() {
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+		shard.hand = 0
+		shard.fold = 0
+		shard.entries = make(map[uint64]uint64)
+		shard.mu.Unlock()
+	}
+}
+
+func (c *cache) Close() error {
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+		shard.entries = nil
+	}
+
+	size := len(c.shards) * len(c.shards[0].memory)
+	return unix.Munmap(c.shards[0].memory[0:size])
 }
 
 func (c *cache) Entries() uint64 {
@@ -181,26 +216,8 @@ func (c *cache) Entries() uint64 {
 	return total
 }
 
-func (c *cache) Clear() {
-	for i := range c.shards {
-		shard := &c.shards[i]
-		shard.mu.Lock()
-		shard.hand = 0
-		shard.gen = 0
-		shard.entries = make(map[uint64]entry)
-		shard.mu.Unlock()
-	}
-}
-
-func (c *cache) Close() error {
-	for i := range c.shards {
-		shard := &c.shards[i]
-		shard.mu.Lock()
-		shard.entries = nil
-	}
-
-	size := len(c.shards) * len(c.shards[0].memory)
-	return unix.Munmap(c.shards[0].memory[0:size])
+func (c *cache) Capacity() uint64 {
+	return uint64(c.shardCount) * uint64(c.shardSize)
 }
 
 func (c *cache) Serialize(w io.Writer) error {
@@ -224,7 +241,7 @@ func (c *cache) Serialize(w io.Writer) error {
 	return e.Encode(plain)
 }
 
-func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
+func Deserialize(r io.Reader, slotSize, slotCount uint32) (Cache, error) {
 	d := gob.NewDecoder(r)
 
 	var rawSeed uint64
@@ -266,7 +283,7 @@ func SaveToFile(c Cache, path string) error {
 	return file.Close()
 }
 
-func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
+func LoadFromFile(path string, slotSize, slotCount uint32) (Cache, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -280,32 +297,28 @@ func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
 	return cache, file.Close()
 }
 
-type entry struct {
-	index int
-	gen   int
-}
-
 type shard struct {
 	mu      *rbMutex
-	entries map[uint64]entry
-	hand    int
-	gen     int
+	entries map[uint64]uint64
+	hand    uint32
+	fold    uint32
 	memory  []byte
 }
 
 func newShard(memory []byte) shard {
 	return shard{
 		mu:      newRBMutex(),
-		entries: make(map[uint64]entry),
+		entries: make(map[uint64]uint64),
 		memory:  memory,
 	}
 }
 
 type header struct {
 	hash uint64
-	size int
+	size uint32
 }
 
 var (
-	headerSize = int(unsafe.Sizeof(header{}))
+	headerSize   = int(unsafe.Sizeof(header{}))
+	headerOffset = uint32(headerSize)
 )

@@ -121,6 +121,10 @@ func (s *TrackerCache) Entries() uint64 {
 	return s.inner.Entries()
 }
 
+func (s *TrackerCache) Capacity() uint64 {
+	return s.inner.Capacity()
+}
+
 func (s *TrackerCache) Serialize(w io.Writer) error {
 	return s.inner.Serialize(w)
 }

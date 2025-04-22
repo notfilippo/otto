@@ -16,25 +16,14 @@ package otto_test
 
 import (
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"net/http"
-	_ "net/http/pprof"
-
 	"github.com/notfilippo/otto"
 )
-
-func TestMain(m *testing.M) {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-	m.Run()
-}
 
 type zipfs struct {
 	s    float64
@@ -49,8 +38,8 @@ func TestHitRatio(t *testing.T) {
 		t.Log("hit ratio test started. the test can take a lot of time to run, use `go test --short` to skip it")
 	}
 
-	shards := []int{100, 500, 1000, 5000}
-	concurrency := []int{1, 2, 4, 8, 16, 32}
+	sizes := []uint32{100, 500, 1000, 5000}
+	concurrency := []int{64, 32, 16, 8, 4, 2, 1}
 
 	keySpace := uint64(10000)
 
@@ -65,13 +54,13 @@ func TestHitRatio(t *testing.T) {
 	// Ops per worker.
 	ops := 500
 
-	for _, shards := range shards {
-		t.Run(fmt.Sprintf("size-%d", shards), func(t *testing.T) {
+	for _, size := range sizes {
+		t.Run(fmt.Sprintf("size-%d", size), func(t *testing.T) {
 			for _, concurrency := range concurrency {
 				t.Run(fmt.Sprintf("concurrency-%d", concurrency), func(t *testing.T) {
 					for _, zipf := range distributions {
 						t.Run(fmt.Sprintf("distribution-%s", zipf.name), func(t *testing.T) {
-							c := otto.New(shards, 1<<12)
+							c := otto.New(size, 1<<9)
 							hits, misses := run(c, keySpace, zipf, concurrency, ops)
 							c.Close()
 
@@ -101,32 +90,22 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 	var (
 		wg           sync.WaitGroup
 		hits, misses atomic.Uint64
-		completedOps atomic.Uint64
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		totalOps := ops * concurrency
-		for range time.Tick(500 * time.Millisecond) {
-			fmt.Printf("\r%d/%d", completedOps.Load(), totalOps)
-			if completedOps.Load() >= uint64(totalOps) {
-				fmt.Print("\r")
-				break
-			}
-		}
-	}()
+	done := make(chan struct{})
 
-	for workerID := range concurrency {
+	for id := range concurrency {
 		wg.Add(1)
-		go func(workerID int) {
+		go func(id int) {
 			defer wg.Done()
 
-			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(workerID))
+			source := rand.NewPCG(uint64(time.Now().UnixNano()), uint64(id))
 			r := rand.New(source)
 			d := rand.NewZipf(r, zipf.s, zipf.v, keySpace-1)
 
 			burstMode := false
+
+			var data []byte
 
 			for range ops {
 				// Occasionally switch between normal and burst modes
@@ -144,15 +123,14 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 				keyRank := (d.Uint64() + popularityShift.Load()) % keySpace
 
 				if r.Float64() < 0.3 {
-					keyRank = (keyRank + uint64(workerID*100)) % keySpace
+					keyRank = (keyRank + uint64(id*100)) % keySpace
 				}
 
 				key := fmt.Sprintf("key-%d", keyRank)
 
-				var data []byte
 				if r.Float64() < 0.85 {
-					data := c.Get(key, data)
-					if len(data) == 0 || string(data) != key {
+					value := c.Get(key, data)
+					if len(value) == 0 || string(value) != key {
 						misses.Add(1)
 
 						// Simulate backend retrieval
@@ -164,13 +142,11 @@ func run(c otto.Cache, keySpace uint64, zipf zipfs, concurrency int, ops int) (u
 				} else {
 					c.Set(key, []byte(key))
 				}
-
-				completedOps.Add(1)
 			}
-		}(workerID)
+		}(id)
 	}
 
 	wg.Wait()
-
+	close(done)
 	return hits.Load(), misses.Load()
 }
