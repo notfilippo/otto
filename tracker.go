@@ -104,6 +104,10 @@ func (s *TrackerCache) Set(key string, val []byte) {
 	s.inner.Set(key, val)
 }
 
+func (s *TrackerCache) Has(key string) bool {
+	return s.inner.Has(key)
+}
+
 func (s *TrackerCache) Clear() {
 	s.hits.Store(0)
 	s.misses.Store(0)

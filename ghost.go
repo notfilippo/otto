@@ -20,11 +20,16 @@ import (
 	"sync"
 )
 
+var (
+	stripedBuffersSize = 4 * nextPowOf2(parallelism())
+	stripedBuffersMask = stripedBuffersSize - 1
+)
+
 // ghost is a striped age-partitioned bloom filter.
 type ghost struct {
-	striped *stripedHashBuffer
-	filter  *apbf
-	mu      sync.RWMutex
+	stripedBuffers []*stripedHashBuffer
+	filter         *apbf
+	mu             sync.RWMutex
 
 	cap int
 }
@@ -35,22 +40,33 @@ func newGhost(cap int) *ghost {
 	e := 0.01 // 1% false positive rate
 	k := math.Ceil(-math.Log2(e))
 	m := math.Ceil((w / l) * k / math.Ln2)
+
+	buffers := make([]*stripedHashBuffer, 0, stripedBuffersSize)
+	for range stripedBuffersSize {
+		buffers = append(buffers, newStripedHashBuffer())
+	}
+
 	return &ghost{
-		striped: newStripedHashBuffer(),
-		filter:  newApbf(int(k), int(l), int(m)),
-		cap:     cap,
+		stripedBuffers: buffers,
+		filter:         newApbf(int(k), int(l), int(m)),
+		cap:            cap,
 	}
 }
 
+func stripedIdx() int {
+	return int(fastrand() & stripedBuffersMask)
+}
+
 func (g *ghost) Add(hash uint64) {
-	result := g.striped.Add(hash)
+	buffer := g.stripedBuffers[stripedIdx()]
+	result := buffer.Add(hash)
 	if result != nil {
 		g.mu.Lock()
 		for _, hash := range result.Buffer {
 			g.filter.Add(hash)
 		}
 		g.mu.Unlock()
-		g.striped.Free()
+		buffer.Free()
 	}
 }
 

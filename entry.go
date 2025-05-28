@@ -17,11 +17,12 @@ package otto
 import "sync/atomic"
 
 type entry struct {
+	freq atomic.Int32
+
 	hash uint64
 	size int
 	slot int
 
-	freq   atomic.Int32
 	access atomic.Int32
 }
 

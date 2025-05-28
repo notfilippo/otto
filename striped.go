@@ -26,8 +26,8 @@ type stripedHashBuffer struct {
 	buffer []uint64
 }
 
-var (
-	stripedCapacity = uint64(nextPowOf2(parallelism()))
+const (
+	stripedCapacity = 16
 	stripedMask     = stripedCapacity - 1
 )
 

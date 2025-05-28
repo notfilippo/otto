@@ -50,3 +50,7 @@ func parallelism() uint32 {
 	}
 	return numCores
 }
+
+//go:noescape
+//go:linkname fastrand runtime.fastrand
+func fastrand() uint32

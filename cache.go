@@ -39,6 +39,10 @@ type Cache interface {
 	// does not exist it will return nil.
 	Get(key string, buf []byte) []byte
 
+	// Has checks if an item - identified by its key - is present in the
+	// cache.
+	Has(key string) bool
+
 	// Clear clears the cache, removing every entry without freeing the memory.
 	Clear()
 
@@ -80,22 +84,23 @@ var _ (InternalStatsCache) = (*cache)(nil)
 
 type cache struct {
 	// Stats
-	memoryUsed atomic.Uint64
+	size atomic.Uint64
 	//lint:ignore U1000 prevents false sharing
-	mupad [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
-
-	closed atomic.Bool
-	//lint:ignore U1000 prevents false sharing
-	cpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
 
 	mSize atomic.Int64
 	//lint:ignore U1000 prevents false sharing
-	mpad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
 
 	sSize atomic.Int64
 	//lint:ignore U1000 prevents false sharing
-	spad [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
 
+	closed atomic.Bool
+	//lint:ignore U1000 prevents false sharing
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+
+	// Memory slots
 	data []byte
 
 	// Metadata
@@ -218,7 +223,7 @@ func (c *cache) set(hash uint64, val []byte) {
 	e.freq.Store(0)
 	e.access.Store(0)
 
-	c.memoryUsed.Add(uint64(size))
+	c.size.Add(uint64(size))
 
 	c.hashmap.Store(hash, e)
 
@@ -271,6 +276,16 @@ func (c *cache) get(hash uint64, dst []byte) []byte {
 	e.access.Add(-1)
 
 	return dst
+}
+
+func (c *cache) Has(key string) bool {
+	if c.closed.Load() {
+		return false
+	}
+
+	hash := maphash.String(c.seed, key)
+	_, ok := c.hashmap.Load(hash)
+	return ok
 }
 
 func (c *cache) evict() {
@@ -345,7 +360,7 @@ func (c *cache) evictEntry(e *entry) {
 		panic("otto: invariant violated: entry with size zero")
 	}
 
-	c.memoryUsed.Add(^uint64(e.size - 1))
+	c.size.Add(^uint64(e.size - 1))
 
 	slots := cost(c.slotSize, e.size)
 
@@ -435,7 +450,7 @@ func (c *cache) Entries() uint64 {
 }
 
 func (c *cache) Size() uint64 {
-	return uint64(c.memoryUsed.Load())
+	return uint64(c.size.Load())
 }
 
 func (c *cache) Capacity() uint64 {
