@@ -181,10 +181,15 @@ func (c *cache) Set(key string, val []byte) {
 
 	hash := maphash.String(c.seed, key)
 
-	c.set(hash, val)
+	c.set(hash, val, frequencyMin)
 }
 
-func (c *cache) set(hash uint64, val []byte) {
+const (
+	frequencyMin = 0
+	frequencyMax = 3
+)
+
+func (c *cache) set(hash uint64, val []byte, frequency int32) {
 	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
 		// Already in the cache and we don't support updates
 		return
@@ -194,11 +199,12 @@ func (c *cache) set(hash uint64, val []byte) {
 	slots := cost(c.slotSize, size)
 
 	if slots > c.slotCap {
-		panic(fmt.Sprintf("otto: entry %d cannot fit in cache size = %d slots = %d", hash, size, slots))
+		// entry cannot fit in cache
+		return
 	}
 
 	var (
-		first  int = -1
+		first  = -1
 		prev   int
 		offset int
 	)
@@ -220,7 +226,7 @@ func (c *cache) set(hash uint64, val []byte) {
 	e.hash = hash
 	e.size = size
 	e.slot = first
-	e.freq.Store(0)
+	e.freq.Store(frequency)
 	e.access.Store(0)
 
 	c.size.Add(uint64(size))
@@ -262,11 +268,11 @@ func (c *cache) get(hash uint64, dst []byte) []byte {
 
 	for {
 		freq := e.freq.Load()
-		if freq == 3 {
+		if freq == frequencyMax {
 			break
 		}
 
-		if e.freq.CompareAndSwap(freq, min(freq+1, 3)) {
+		if e.freq.CompareAndSwap(freq, min(freq+1, frequencyMax)) {
 			break
 		}
 	}
@@ -450,7 +456,7 @@ func (c *cache) Entries() uint64 {
 }
 
 func (c *cache) Size() uint64 {
-	return uint64(c.size.Load())
+	return c.size.Load()
 }
 
 func (c *cache) Capacity() uint64 {
@@ -473,6 +479,11 @@ func (c *cache) SQueueEntries() uint64 {
 	return uint64(c.sSize.Load())
 }
 
+type serializedEntry struct {
+	Value []byte
+	Freq  int32
+}
+
 func (c *cache) Serialize(w io.Writer) error {
 	e := gob.NewEncoder(w)
 
@@ -481,9 +492,12 @@ func (c *cache) Serialize(w io.Writer) error {
 		return err
 	}
 
-	plain := make(map[uint64][]byte)
+	plain := make(map[uint64]serializedEntry)
 	c.hashmap.Range(func(k uint64, v *entry) bool {
-		plain[k] = c.get(k, nil)
+		plain[k] = serializedEntry{
+			Value: c.get(k, nil),
+			Freq:  v.freq.Load(),
+		}
 		return true
 	})
 
@@ -509,7 +523,7 @@ func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 
 	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
-	plain := make(map[uint64][]byte)
+	plain := make(map[uint64]serializedEntry)
 	if err := d.Decode(&plain); err != nil {
 		return nil, err
 	}
@@ -518,11 +532,12 @@ func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 	c.seed = seed
 
 	for k, v := range plain {
-		if len(v) == 0 {
+		if len(v.Value) == 0 {
 			continue
 		}
 
-		c.set(k, v)
+		clampedFreq := max(min(v.Freq, frequencyMax), frequencyMin)
+		c.set(k, v.Value, clampedFreq)
 	}
 
 	return c, nil
