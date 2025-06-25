@@ -456,7 +456,7 @@ func (c *cache) Entries() uint64 {
 }
 
 func (c *cache) Size() uint64 {
-	return uint64(c.size.Load())
+	return c.size.Load()
 }
 
 func (c *cache) Capacity() uint64 {
@@ -479,6 +479,11 @@ func (c *cache) SQueueEntries() uint64 {
 	return uint64(c.sSize.Load())
 }
 
+type serializedEntry struct {
+	Value []byte
+	Freq  int32
+}
+
 func (c *cache) Serialize(w io.Writer) error {
 	e := gob.NewEncoder(w)
 
@@ -487,9 +492,12 @@ func (c *cache) Serialize(w io.Writer) error {
 		return err
 	}
 
-	plain := make(map[uint64][]byte)
+	plain := make(map[uint64]serializedEntry)
 	c.hashmap.Range(func(k uint64, v *entry) bool {
-		plain[k] = c.get(k, nil)
+		plain[k] = serializedEntry{
+			Value: c.get(k, nil),
+			Freq:  v.freq.Load(),
+		}
 		return true
 	})
 
@@ -515,7 +523,7 @@ func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 
 	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
-	plain := make(map[uint64][]byte)
+	plain := make(map[uint64]serializedEntry)
 	if err := d.Decode(&plain); err != nil {
 		return nil, err
 	}
@@ -524,11 +532,12 @@ func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 	c.seed = seed
 
 	for k, v := range plain {
-		if len(v) == 0 {
+		if len(v.Value) == 0 {
 			continue
 		}
 
-		c.set(k, v, frequencyMax)
+		clampedFreq := max(min(v.Freq, frequencyMax), frequencyMin)
+		c.set(k, v.Value, clampedFreq)
 	}
 
 	return c, nil
