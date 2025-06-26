@@ -89,11 +89,15 @@ type cache struct {
 
 	mSize atomic.Int64
 	//lint:ignore U1000 prevents false sharing
-	_ [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Int64{})]byte
 
 	sSize atomic.Int64
 	//lint:ignore U1000 prevents false sharing
-	_ [cacheLineSize - unsafe.Sizeof(atomic.Bool{})]byte
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Int64{})]byte
+
+	hashOffset atomic.Uint64
+	//lint:ignore U1000 prevents false sharing
+	_ [cacheLineSize - unsafe.Sizeof(atomic.Uint64{})]byte
 
 	closed atomic.Bool
 	//lint:ignore U1000 prevents false sharing
@@ -179,6 +183,7 @@ func (c *cache) Set(key string, val []byte) {
 	}
 
 	hash := maphash.String(c.seed, key)
+	hash += c.hashOffset.Load()
 
 	c.set(hash, val, frequencyMin)
 }
@@ -251,6 +256,8 @@ func (c *cache) Get(key string, dst []byte) []byte {
 	}
 
 	hash := maphash.String(c.seed, key)
+	hash += c.hashOffset.Load()
+
 	return c.get(hash, dst)
 }
 
@@ -412,37 +419,11 @@ func (c *cache) read(e *entry, dst []byte) []byte {
 }
 
 func (c *cache) Clear() {
-	c.hashmap.Clear()
-
-	for {
-		if e, ok := c.m.TryDequeue(); ok {
-			c.pool.Put(e)
-		} else {
-			break
-		}
-	}
-
-	for {
-		if e, ok := c.s.TryDequeue(); ok {
-			c.pool.Put(e)
-		} else {
-			break
-		}
-	}
-
-	c.g.Clear()
-
-	for {
-		if _, ok := c.alloc.TryDequeue(); !ok {
-			break
-		}
-	}
-
-	for i := range c.slotCap {
-		if !c.alloc.TryEnqueue(i) {
-			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
-		}
-	}
+	c.hashOffset.Add(1)
+	_ = c.hashmap.Range(func(_ uint64, e *entry) error {
+		e.freq.Store(0)
+		return nil
+	})
 }
 
 func (c *cache) Close() error {
