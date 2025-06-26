@@ -16,6 +16,7 @@ package otto
 
 import (
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 	"hash/maphash"
 	"io"
@@ -461,42 +462,37 @@ func (c *cache) SQueueEntries() uint64 {
 
 const serializeVersionHeader = "otto-cache-1.0.0"
 
+type serializedEntry struct {
+	Key   uint64
+	Value []byte
+	Freq  int32
+}
+
 func (c *cache) Serialize(w io.Writer) error {
-	if _, err := w.Write([]byte(serializeVersionHeader)); err != nil {
-		return fmt.Errorf("failed to read version header: %w", err)
+	e := gob.NewEncoder(w)
+
+	if err := e.Encode(serializeVersionHeader); err != nil {
+		return fmt.Errorf("failed to encode version header: %w", err)
 	}
 
 	seed := *(*uint64)(unsafe.Pointer(&c.seed))
-	if err := binary.Write(w, binary.LittleEndian, seed); err != nil {
-		return fmt.Errorf("failed to read seed: %w", err)
-	}
-
-	entryCount := c.hashmap.Size()
-	if err := binary.Write(w, binary.LittleEndian, uint64(entryCount)); err != nil {
-		return fmt.Errorf("failed to read entryCount: %w", err)
+	if err := e.Encode(seed); err != nil {
+		return fmt.Errorf("failed to encode seed: %w", err)
 	}
 
 	err := c.hashmap.Range(func(k uint64, v *entry) error {
-		if err := binary.Write(w, binary.LittleEndian, k); err != nil {
-			return fmt.Errorf("failed to read key: %w", err)
+		se := serializedEntry{
+			Key:   k,
+			Value: c.read(v, nil),
+			Freq:  v.freq.Load(),
 		}
 
-		freq := v.freq.Load()
-		if err := binary.Write(w, binary.LittleEndian, freq); err != nil {
-			return fmt.Errorf("failed to read freq: %w", err)
-		}
-
-		if err := binary.Write(w, binary.LittleEndian, uint64(v.size)); err != nil {
-			return fmt.Errorf("failed to read value size: %w", err)
-		}
-
-		value := c.get(k, nil)
-		if _, err := w.Write(value); err != nil {
-			return fmt.Errorf("failed to read value: %w", err)
-		}
-
-		return nil
+		return e.Encode(se)
 	})
+
+	if err != nil {
+		return fmt.Errorf("failed to encode entry: %w", err)
+	}
 
 	return err
 }
@@ -511,54 +507,40 @@ func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
 // DeserializeEx deserializes the cache from a byte stream.
 // Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
 func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
-	versionHeader := make([]byte, len(serializeVersionHeader))
-	if _, err := io.ReadFull(r, versionHeader); err != nil {
-		return nil, fmt.Errorf("failed to read version header: %w", err)
+	d := gob.NewDecoder(r)
+
+	var versionHeader string
+	if err := d.Decode(&versionHeader); err != nil {
+		return nil, fmt.Errorf("failed to decode version header: %w", err)
 	}
 
-	if string(versionHeader) != serializeVersionHeader {
-		return nil, fmt.Errorf("invalid cache version header: expected %q, got %q", serializeVersionHeader, string(versionHeader))
+	if versionHeader != serializeVersionHeader {
+		return nil, fmt.Errorf("unsupported version header: %s", versionHeader)
 	}
 
 	var rawSeed uint64
-	if err := binary.Read(r, binary.LittleEndian, &rawSeed); err != nil {
-		return nil, fmt.Errorf("failed to read seed: %w", err)
+	if err := d.Decode(&rawSeed); err != nil {
+		return nil, fmt.Errorf("failed to decode seed: %w", err)
 	}
-	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
-	var entryCount uint64
-	if err := binary.Read(r, binary.LittleEndian, &entryCount); err != nil {
-		return nil, fmt.Errorf("failed to read entryCount: %w", err)
-	}
+	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
 	c := NewEx(slotSize, mCap, sCap).(*cache)
 	c.seed = seed
 
-	// Stream entries one by one
-	for i := uint64(0); i < entryCount; i++ {
-		var hash uint64
-		if err := binary.Read(r, binary.LittleEndian, &hash); err != nil {
-			return nil, fmt.Errorf("failed to read hash: %w", err)
+	for {
+		var se serializedEntry
+		if err := d.Decode(&se); err != nil {
+			if err == io.EOF {
+				break // End of stream
+			}
+
+			return nil, fmt.Errorf("failed to decode entry: %w", err)
 		}
 
-		var freq int32
-		if err := binary.Read(r, binary.LittleEndian, &freq); err != nil {
-			return nil, fmt.Errorf("failed to read freq: %w", err)
-		}
+		clampedFreq := max(min(se.Freq, frequencyMax), frequencyMin)
 
-		var valueSize uint64
-		if err := binary.Read(r, binary.LittleEndian, &valueSize); err != nil {
-			return nil, fmt.Errorf("failed to read valueSize: %w", err)
-		}
-
-		value := make([]byte, valueSize)
-		if _, err := io.ReadFull(r, value); err != nil {
-			return nil, fmt.Errorf("failed to read value: %w", err)
-		}
-
-		clampedFreq := max(min(freq, frequencyMax), frequencyMin)
-
-		c.set(hash, value, clampedFreq)
+		c.set(se.Key, se.Value, clampedFreq)
 	}
 
 	return c, nil
