@@ -463,36 +463,36 @@ const serializeVersionHeader = "otto-cache-1.0.0"
 
 func (c *cache) Serialize(w io.Writer) error {
 	if _, err := w.Write([]byte(serializeVersionHeader)); err != nil {
-		return fmt.Errorf("failed to serialize cache: version header - %w", err)
+		return fmt.Errorf("failed to read version header: %w", err)
 	}
 
 	seed := *(*uint64)(unsafe.Pointer(&c.seed))
 	if err := binary.Write(w, binary.LittleEndian, seed); err != nil {
-		return fmt.Errorf("failed to serialize cache: seed - %w", err)
+		return fmt.Errorf("failed to read seed: %w", err)
 	}
 
 	entryCount := c.hashmap.Size()
 	if err := binary.Write(w, binary.LittleEndian, uint64(entryCount)); err != nil {
-		return fmt.Errorf("failed to serialize cache: entryCount - %w", err)
+		return fmt.Errorf("failed to read entryCount: %w", err)
 	}
 
 	err := c.hashmap.Range(func(k uint64, v *entry) error {
 		if err := binary.Write(w, binary.LittleEndian, k); err != nil {
-			return fmt.Errorf("failed to serialize cache: key - %w", err)
+			return fmt.Errorf("failed to read key: %w", err)
 		}
 
 		freq := v.freq.Load()
 		if err := binary.Write(w, binary.LittleEndian, freq); err != nil {
-			return fmt.Errorf("failed to serialize cache: freq - %w", err)
+			return fmt.Errorf("failed to read freq: %w", err)
 		}
 
 		if err := binary.Write(w, binary.LittleEndian, uint64(v.size)); err != nil {
-			return fmt.Errorf("failed to serialize cache: value size - %w", err)
+			return fmt.Errorf("failed to read value size: %w", err)
 		}
 
 		value := c.get(k, nil)
 		if _, err := w.Write(value); err != nil {
-			return fmt.Errorf("failed to serialize cache: value - %w", err)
+			return fmt.Errorf("failed to read value: %w", err)
 		}
 
 		return nil
@@ -513,7 +513,7 @@ func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
 func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 	versionHeader := make([]byte, len(serializeVersionHeader))
 	if _, err := io.ReadFull(r, versionHeader); err != nil {
-		return nil, fmt.Errorf("failed to deserialize cache: version header - %w", err)
+		return nil, fmt.Errorf("failed to read version header: %w", err)
 	}
 
 	if string(versionHeader) != serializeVersionHeader {
@@ -522,13 +522,13 @@ func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 
 	var rawSeed uint64
 	if err := binary.Read(r, binary.LittleEndian, &rawSeed); err != nil {
-		return nil, fmt.Errorf("failed to deserialize cache: seed - %w", err)
+		return nil, fmt.Errorf("failed to read seed: %w", err)
 	}
 	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
 	var entryCount uint64
 	if err := binary.Read(r, binary.LittleEndian, &entryCount); err != nil {
-		return nil, fmt.Errorf("failed to deserialize cache: entryCount - %w", err)
+		return nil, fmt.Errorf("failed to read entryCount: %w", err)
 	}
 
 	c := NewEx(slotSize, mCap, sCap).(*cache)
@@ -538,22 +538,22 @@ func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
 	for i := uint64(0); i < entryCount; i++ {
 		var hash uint64
 		if err := binary.Read(r, binary.LittleEndian, &hash); err != nil {
-			return nil, fmt.Errorf("failed to deserialize cache: hash - %w", err)
+			return nil, fmt.Errorf("failed to read hash: %w", err)
 		}
 
 		var freq int32
 		if err := binary.Read(r, binary.LittleEndian, &freq); err != nil {
-			return nil, fmt.Errorf("failed to deserialize cache: freq - %w", err)
+			return nil, fmt.Errorf("failed to read freq: %w", err)
 		}
 
 		var valueSize uint64
 		if err := binary.Read(r, binary.LittleEndian, &valueSize); err != nil {
-			return nil, fmt.Errorf("failed to deserialize cache: valueSize - %w", err)
+			return nil, fmt.Errorf("failed to read valueSize: %w", err)
 		}
 
 		value := make([]byte, valueSize)
 		if _, err := io.ReadFull(r, value); err != nil {
-			return nil, fmt.Errorf("failed to deserialize cache: value - %w", err)
+			return nil, fmt.Errorf("failed to read value: %w", err)
 		}
 
 		clampedFreq := max(min(freq, frequencyMax), frequencyMin)
