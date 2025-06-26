@@ -585,7 +585,7 @@ func LoadFromFile(path string, slotSize, slotCount int) (Cache, error) {
 	return LoadFromFileEx(path, slotSize, mCap, sCap)
 }
 
-// LoadFromFile deserializes the cache from the file at the provided path.
+// LoadFromFileEx deserializes the cache from the file at the provided path.
 // Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
 func LoadFromFileEx(path string, slotSize, mCap, sCap int) (Cache, error) {
 	file, err := os.Open(path)
