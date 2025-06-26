@@ -194,6 +194,7 @@ func TestClear(t *testing.T) {
 func TestSerialize(t *testing.T) {
 	c := defaultCache(t)
 	cacheSet(t, c, 0, 1)
+	cacheSet(t, c, 1, 2)
 	var buf bytes.Buffer
 	err := c.Serialize(&buf)
 	if err != nil {
@@ -205,6 +206,7 @@ func TestSerialize(t *testing.T) {
 		t.Fatalf("failed to deserialize cache: %v", err)
 	}
 	cacheHit(t, c, 0, 1)
+	cacheHit(t, c, 1, 2)
 }
 
 func BenchmarkConcurrentGet(b *testing.B) {
