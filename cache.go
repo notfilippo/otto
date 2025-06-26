@@ -459,7 +459,13 @@ func (c *cache) SQueueEntries() uint64 {
 	return uint64(c.sSize.Load())
 }
 
+const serializeVersionHeader = "otto-cache-1.0.0"
+
 func (c *cache) Serialize(w io.Writer) error {
+	if _, err := w.Write([]byte(serializeVersionHeader)); err != nil {
+		return fmt.Errorf("failed to serialize cache: version header - %w", err)
+	}
+
 	seed := *(*uint64)(unsafe.Pointer(&c.seed))
 	if err := binary.Write(w, binary.LittleEndian, seed); err != nil {
 		return fmt.Errorf("failed to serialize cache: seed - %w", err)
@@ -505,9 +511,18 @@ func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
 // DeserializeEx deserializes the cache from a byte stream.
 // Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
 func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
+	versionHeader := make([]byte, len(serializeVersionHeader))
+	if _, err := io.ReadFull(r, versionHeader); err != nil {
+		return nil, fmt.Errorf("failed to deserialize cache: version header - %w", err)
+	}
+
+	if string(versionHeader) != serializeVersionHeader {
+		return nil, fmt.Errorf("invalid cache version header: expected %q, got %q", serializeVersionHeader, string(versionHeader))
+	}
+
 	var rawSeed uint64
 	if err := binary.Read(r, binary.LittleEndian, &rawSeed); err != nil {
-		return nil, fmt.Errorf("Failed to deserialize cache: seed - %w", err)
+		return nil, fmt.Errorf("failed to deserialize cache: seed - %w", err)
 	}
 	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
