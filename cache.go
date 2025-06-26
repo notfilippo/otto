@@ -16,7 +16,6 @@ package otto
 
 import (
 	"encoding/binary"
-	"encoding/gob"
 	"fmt"
 	"hash/maphash"
 	"io"
@@ -479,29 +478,40 @@ func (c *cache) SQueueEntries() uint64 {
 	return uint64(c.sSize.Load())
 }
 
-type serializedEntry struct {
-	Value []byte
-	Freq  int32
-}
-
 func (c *cache) Serialize(w io.Writer) error {
-	e := gob.NewEncoder(w)
-
 	seed := *(*uint64)(unsafe.Pointer(&c.seed))
-	if err := e.Encode(seed); err != nil {
-		return err
+	if err := binary.Write(w, binary.LittleEndian, seed); err != nil {
+		return fmt.Errorf("failed to serialize cache: seed - %w", err)
 	}
 
-	plain := make(map[uint64]serializedEntry)
-	c.hashmap.Range(func(k uint64, v *entry) bool {
-		plain[k] = serializedEntry{
-			Value: c.get(k, nil),
-			Freq:  v.freq.Load(),
+	entryCount := c.hashmap.Size()
+	if err := binary.Write(w, binary.LittleEndian, uint64(entryCount)); err != nil {
+		return fmt.Errorf("failed to serialize cache: entryCount - %w", err)
+	}
+
+	err := c.hashmap.Range(func(k uint64, v *entry) error {
+		if err := binary.Write(w, binary.LittleEndian, k); err != nil {
+			return fmt.Errorf("failed to serialize cache: key - %w", err)
 		}
-		return true
+
+		freq := v.freq.Load()
+		if err := binary.Write(w, binary.LittleEndian, freq); err != nil {
+			return fmt.Errorf("failed to serialize cache: freq - %w", err)
+		}
+
+		if err := binary.Write(w, binary.LittleEndian, uint64(v.size)); err != nil {
+			return fmt.Errorf("failed to serialize cache: value size - %w", err)
+		}
+
+		value := c.get(k, nil)
+		if _, err := w.Write(value); err != nil {
+			return fmt.Errorf("failed to serialize cache: value - %w", err)
+		}
+
+		return nil
 	})
 
-	return e.Encode(plain)
+	return err
 }
 
 // Deserialize deserializes the cache from a byte stream.
@@ -514,30 +524,45 @@ func Deserialize(r io.Reader, slotSize, slotCount int) (Cache, error) {
 // DeserializeEx deserializes the cache from a byte stream.
 // Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
 func DeserializeEx(r io.Reader, slotSize, mCap, sCap int) (Cache, error) {
-	d := gob.NewDecoder(r)
-
 	var rawSeed uint64
-	if err := d.Decode(&rawSeed); err != nil {
-		return nil, err
+	if err := binary.Read(r, binary.LittleEndian, &rawSeed); err != nil {
+		return nil, fmt.Errorf("Failed to deserialize cache: seed - %w", err)
 	}
-
 	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
 
-	plain := make(map[uint64]serializedEntry)
-	if err := d.Decode(&plain); err != nil {
-		return nil, err
+	var entryCount uint64
+	if err := binary.Read(r, binary.LittleEndian, &entryCount); err != nil {
+		return nil, fmt.Errorf("failed to deserialize cache: entryCount - %w", err)
 	}
 
 	c := NewEx(slotSize, mCap, sCap).(*cache)
 	c.seed = seed
 
-	for k, v := range plain {
-		if len(v.Value) == 0 {
-			continue
+	// Stream entries one by one
+	for i := uint64(0); i < entryCount; i++ {
+		var hash uint64
+		if err := binary.Read(r, binary.LittleEndian, &hash); err != nil {
+			return nil, fmt.Errorf("failed to deserialize cache: hash - %w", err)
 		}
 
-		clampedFreq := max(min(v.Freq, frequencyMax), frequencyMin)
-		c.set(k, v.Value, clampedFreq)
+		var freq int32
+		if err := binary.Read(r, binary.LittleEndian, &freq); err != nil {
+			return nil, fmt.Errorf("failed to deserialize cache: freq - %w", err)
+		}
+
+		var valueSize uint64
+		if err := binary.Read(r, binary.LittleEndian, &valueSize); err != nil {
+			return nil, fmt.Errorf("failed to deserialize cache: valueSize - %w", err)
+		}
+
+		value := make([]byte, valueSize)
+		if _, err := io.ReadFull(r, value); err != nil {
+			return nil, fmt.Errorf("failed to deserialize cache: value - %w", err)
+		}
+
+		clampedFreq := max(min(freq, frequencyMax), frequencyMin)
+
+		c.set(hash, value, clampedFreq)
 	}
 
 	return c, nil
@@ -574,7 +599,7 @@ func LoadFromFileEx(path string, slotSize, mCap, sCap int) (Cache, error) {
 
 	cache, err := DeserializeEx(file, slotSize, mCap, sCap)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize to file: %w", err)
+		return nil, fmt.Errorf("failed to deserialize from file: %w", err)
 	}
 
 	return cache, file.Close()

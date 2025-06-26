@@ -109,10 +109,10 @@ func (m *hmap[T]) Delete(hash uint64) {
 }
 
 // Range calls f sequentially for each key hash and value present in the
-// map. If f returns false, range stops the iteration.
+// map. If f returns error, range stops the iteration and returns that error.
 // Range acquires locks shard by shard. It does not represent a consistent
 // snapshot of the map if modifications occur concurrently.
-func (m *hmap[T]) Range(f func(key uint64, value T) bool) {
+func (m *hmap[T]) Range(f func(key uint64, value T) error) error {
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.RLock()
@@ -124,11 +124,13 @@ func (m *hmap[T]) Range(f func(key uint64, value T) bool) {
 		s.RUnlock() // Release lock before calling f
 
 		for k, v := range shardCopy {
-			if !f(k, v) {
-				return // Stop iteration if f returns false
+			if err := f(k, v); err != nil {
+				return err // Stop iteration if f returns error
 			}
 		}
 	}
+
+	return nil
 }
 
 // Clear deletes all keys and values currently stored in the map.
