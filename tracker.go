@@ -99,9 +99,9 @@ func (s *TrackerCache) Get(key string, buf []byte) []byte {
 	return result
 }
 
-func (s *TrackerCache) Set(key string, val []byte) {
+func (s *TrackerCache) Set(key string, val []byte) error {
 	s.sets.Add(1)
-	s.inner.Set(key, val)
+	return s.inner.Set(key, val)
 }
 
 func (s *TrackerCache) Has(key string) bool {
