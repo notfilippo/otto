@@ -17,6 +17,7 @@ package otto
 import (
 	"encoding/binary"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"hash/maphash"
 	"io"
@@ -28,12 +29,17 @@ import (
 	"unsafe"
 )
 
+var EmptyValue = errors.New("otto: can't add empty value to cache")
+var ClosedCache = errors.New("otto: can't perform operation on closed cache")
+var AlreadyExists = errors.New("otto: key already exists in cache")
+var TooBig = errors.New("otto: value is too big for cache")
+
 type Cache interface {
 	// Set inserts an item in the cache. If the cache is full an element
 	// will be evicted.
 	//
 	// NOTE: updates are not supported.
-	Set(key string, val []byte)
+	Set(key string, val []byte) error
 
 	// Get retrieves - if available - an item from the cache. If the item
 	// does not exist it will return nil.
@@ -178,15 +184,19 @@ func (c *cache) slice(i int) []byte {
 	return c.data[i*c.slotSize : (i+1)*c.slotSize]
 }
 
-func (c *cache) Set(key string, val []byte) {
-	if len(val) == 0 || c.closed.Load() {
-		return
+func (c *cache) Set(key string, val []byte) error {
+	if len(val) == 0 {
+		return EmptyValue
+	}
+
+	if c.closed.Load() {
+		return ClosedCache
 	}
 
 	hash := maphash.String(c.seed, key)
 	hash += c.hashOffset.Load()
 
-	c.set(hash, val, frequencyMin)
+	return c.set(hash, val, frequencyMin)
 }
 
 const (
@@ -194,10 +204,10 @@ const (
 	frequencyMax = 3
 )
 
-func (c *cache) set(hash uint64, val []byte, frequency int32) {
+func (c *cache) set(hash uint64, val []byte, frequency int32) error {
 	if _, ok := c.hashmap.LoadOrStore(hash, nil); ok {
 		// Already in the cache and we don't support updates
-		return
+		return AlreadyExists
 	}
 
 	size := len(val)
@@ -205,7 +215,7 @@ func (c *cache) set(hash uint64, val []byte, frequency int32) {
 
 	if slots > c.slotCap {
 		// entry cannot fit in cache
-		return
+		return TooBig
 	}
 
 	var (
@@ -249,6 +259,8 @@ func (c *cache) set(hash uint64, val []byte, frequency int32) {
 		}
 		c.sSize.Add(int64(slots))
 	}
+
+	return nil
 }
 
 func (c *cache) Get(key string, dst []byte) []byte {
