@@ -38,7 +38,7 @@ func TestHitRatio(t *testing.T) {
 		t.Log("hit ratio test started. the test can take a lot of time to run, use `go test --short` to skip it")
 	}
 
-	sizes := []int{100, 500, 1000, 5000}
+	sizes := []int32{100, 500, 1000, 5000}
 	concurrency := []int{64, 32, 16, 8, 4, 2, 1}
 
 	keySpace := uint64(10000)

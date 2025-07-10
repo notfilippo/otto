@@ -23,7 +23,7 @@ import (
 	"testing"
 )
 
-func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int) Cache {
+func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int32) Cache {
 	cache := NewEx(slotSize, mCapacity, sCapacity)
 	tb.Cleanup(func() {
 		if err := cache.Close(); err != nil {
@@ -33,7 +33,7 @@ func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int) Cache {
 	return cache
 }
 
-var (
+const (
 	testSlotSize  = 16
 	testMCapacity = 9000
 	testSCapacity = 1000

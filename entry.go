@@ -14,32 +14,16 @@
 
 package otto
 
-import "sync/atomic"
-
-type entry struct {
-	freq atomic.Int32
-
-	hash uint64
-	size int
-	slot int
-
-	access atomic.Int32
-}
+import "unsafe"
 
 // headerSize represents the size reserved at the start for each slot. That memory
 // area stores a native-endian uint64 representing the next block linked to the
 // current.
-const headerSize = 8 // a.k.a. sizeof(uint64)
-
-// newEntry creates a new entry as an any object. It is used in the
-// cache's sync.Pool to instantiate new entries.
-func newEntry() any {
-	return new(entry)
-}
+const headerSize = int32(unsafe.Sizeof(int32(0)))
 
 // cost returns the slots needed to fit an entry of `entrySize` in
 // a cache that has slots of `slotSize`. It takes into account the
 // header size, which is stored alongside the cached values.
-func cost(slotSize, entrySize int) int {
+func cost(slotSize, entrySize int32) int32 {
 	return (entrySize + slotSize - headerSize - 1) / (slotSize - headerSize)
 }
