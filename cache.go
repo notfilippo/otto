@@ -174,7 +174,7 @@ func NewEx(slotSize, mCap, sCap int32) Cache {
 	}
 
 	for i := range c.slotCap {
-		if !c.alloc.TryEnqueue(i) {
+		if c.alloc.TryEnqueue(i) != enqueueOk {
 			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
 		}
 	}
@@ -227,19 +227,24 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 		first  int32 = -1
 		prev   int32
 		offset int
+		deqRes dequeueResult
 	)
 
-	for !c.alloc.TryDequeueBatch(int(slots), func(i int32) {
-		if first == -1 {
-			first = i
-		} else {
-			binary.NativeEndian.PutUint32(c.slice(prev), uint32(i))
-		}
+	for tryDeq := true; tryDeq; tryDeq = (deqRes != dequeueOk) {
+		deqRes = c.alloc.TryDequeueBatch(int(slots), func(i int32) {
+			if first == -1 {
+				first = i
+			} else {
+				binary.NativeEndian.PutUint32(c.slice(prev), uint32(i))
+			}
 
-		offset += copy(c.slice(i)[headerSize:], val[offset:])
-		prev = i
-	}) {
-		c.evict()
+			offset += copy(c.slice(i)[headerSize:], val[offset:])
+			prev = i
+		})
+
+		if deqRes == dequeueEmpty {
+			c.evict()
+		}
 	}
 
 	c.eAccess[first].Store(0)
@@ -251,14 +256,21 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 
 	c.hashmap.Store(hash, first)
 
+	var enqRes enqueueResult
 	if useMQueue || c.g.In(hash) {
-		for !c.m.TryEnqueue(first) {
-			c.evictM()
+		for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+			enqRes = c.m.TryEnqueue(first)
+			if enqRes == enqueueFull {
+				c.evictM()
+			}
 		}
 		c.mSize.Add(int64(slots))
 	} else {
-		for !c.s.TryEnqueue(first) {
-			c.evictS()
+		for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+			enqRes = c.s.TryEnqueue(first)
+			if enqRes == enqueueFull {
+				c.evictS()
+			}
 		}
 		c.sSize.Add(int64(slots))
 	}
@@ -325,9 +337,18 @@ func (c *cache) evict() {
 }
 
 func (c *cache) evictS() {
-	e, ok := c.s.TryDequeue()
-	for ok {
-		slots := int64(cost(c.slotSize, c.eSize[e]))
+	var (
+		entry  int32
+		deqRes dequeueResult
+	)
+
+	for tryDeq := true; tryDeq; tryDeq = (deqRes != dequeueEmpty) {
+		entry, deqRes = c.s.TryDequeue()
+		if deqRes != dequeueOk {
+			continue
+		}
+
+		slots := int64(cost(c.slotSize, c.eSize[entry]))
 
 		c.sSize.Add(-slots)
 
@@ -335,47 +356,62 @@ func (c *cache) evictS() {
 		// frequency 0 is concurrently accessed as the eviction runs
 		// it will have a frequency of 1 and it will still get promoted
 		// to the m-queue.
-		if c.eFreq[e].Load() <= 1 && c.eAccess[e].CompareAndSwap(0, math.MinInt32) {
-			c.g.Add(c.eHash[e])
-			c.evictEntry(e)
+		if c.eFreq[entry].Load() <= 1 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
+			c.g.Add(c.eHash[entry])
+			c.evictEntry(entry)
 			return
 		}
 
-		for !c.m.TryEnqueue(e) {
-			c.evictM()
+		var enqRes enqueueResult
+		for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+			enqRes = c.m.TryEnqueue(entry)
+			if enqRes == enqueueFull {
+				c.evictM()
+			}
 		}
-		c.mSize.Add(slots)
 
-		e, ok = c.s.TryDequeue()
+		c.mSize.Add(slots)
 	}
 }
 
 func (c *cache) evictM() {
-	e, ok := c.m.TryDequeue()
-	for ok {
-		slots := int64(cost(c.slotSize, c.eSize[e]))
+	var (
+		entry  int32
+		deqRes dequeueResult
+	)
+
+	for tryDeq := true; tryDeq; tryDeq = (deqRes != dequeueEmpty) {
+		entry, deqRes = c.m.TryDequeue()
+		if deqRes != dequeueOk {
+			continue
+		}
+
+		slots := int64(cost(c.slotSize, c.eSize[entry]))
 
 		c.mSize.Add(-slots)
 
-		if c.eFreq[e].Load() <= 0 && c.eAccess[e].CompareAndSwap(0, math.MinInt32) {
-			c.evictEntry(e)
+		if c.eFreq[entry].Load() <= 0 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
+			c.evictEntry(entry)
 			return
 		}
 
 		for {
-			freq := c.eFreq[e].Load()
+			freq := c.eFreq[entry].Load()
 
-			if c.eFreq[e].CompareAndSwap(freq, max(0, freq-1)) {
-				for !c.m.TryEnqueue(e) {
-					c.evictM()
+			if c.eFreq[entry].CompareAndSwap(freq, max(0, freq-1)) {
+				var enqRes enqueueResult
+				for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+					enqRes = c.m.TryEnqueue(entry)
+					if enqRes == enqueueFull {
+						c.evictM()
+					}
 				}
+
 				c.mSize.Add(slots)
 
 				break
 			}
 		}
-
-		e, ok = c.m.TryDequeue()
 	}
 }
 
@@ -395,12 +431,12 @@ func (c *cache) evictEntry(e int32) {
 	prev := e
 
 	var next, current int32
-	for !c.alloc.TryEnqueueBatch(int(slots), func() int32 {
+	for c.alloc.TryEnqueueBatch(int(slots), func() int32 {
 		next = int32(binary.NativeEndian.Uint32(c.slice(prev)))
 		current = prev
 		prev = next
 		return current
-	}) {
+	}) != enqueueOk {
 		runtime.Gosched()
 	}
 

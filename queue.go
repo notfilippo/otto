@@ -65,10 +65,21 @@ func newQueue[T any](cap int) *queue[T] {
 	}
 }
 
+// enqueueResult represent the 3 possible states of an enqueue
+// operation, allowing the caller to decide whether to evict from
+// the queue or just retry.
+type enqueueResult int8
+
+const (
+	enqueueFull enqueueResult = iota
+	enqueueRetry
+	enqueueOk
+)
+
 // TryEnqueue inserts the given item into the queue. Does not block
 // and returns immediately. The result indicates that the queue isn't
 // full and the item was inserted.
-func (q *queue[T]) TryEnqueue(item T) bool {
+func (q *queue[T]) TryEnqueue(item T) enqueueResult {
 	head := q.head.Load()
 	slot := &q.slots[q.idx(head)]
 	turn := q.turn(head) * 2
@@ -76,38 +87,50 @@ func (q *queue[T]) TryEnqueue(item T) bool {
 		if q.head.CompareAndSwap(head, head+1) {
 			slot.item = item
 			slot.turn.Store(turn + 1)
-			return true
+			return enqueueOk
 		}
+		return enqueueRetry
 	}
-	return false
+	return enqueueFull
 }
+
+// dequeueResult represent the 3 possible states of an dequeue
+// operation, allowing the caller to decide whether to wait for
+// new elements to be added to the queue or just retry.
+type dequeueResult int8
+
+const (
+	dequeueEmpty dequeueResult = iota
+	dequeueRetry
+	dequeueOk
+)
 
 // TryDequeue retrieves and removes the item from the head of the
 // queue. Does not block and returns immediately. The ok result
 // indicates that the queue isn't empty and an item was retrieved.
-func (q *queue[T]) TryDequeue() (item T, ok bool) {
+func (q *queue[T]) TryDequeue() (item T, res dequeueResult) {
 	tail := q.tail.Load()
 	slot := &q.slots[q.idx(tail)]
 	turn := q.turn(tail)*2 + 1
 	if slot.turn.Load() == turn {
 		if q.tail.CompareAndSwap(tail, tail+1) {
 			item = slot.item
-			ok = true
 			var zero T
 			slot.item = zero
 			slot.turn.Store(turn + 1)
-			return
+			return item, dequeueOk
 		}
+		return item, dequeueRetry
 	}
-	return
+	return item, dequeueEmpty
 }
 
 // TryDequeueBatch attempts to atomically dequeue exactly n items from the queue.
 // Returns the dequeued items and a boolean indicating success. If the queue
 // doesn't have at least n items, no items are dequeued and the function returns false.
-func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
+func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) dequeueResult {
 	if n <= 0 {
-		return false
+		return dequeueOk
 	}
 
 	// Load the tail index
@@ -119,13 +142,13 @@ func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
 		slot := &q.slots[idx]
 		turn := q.turn(tail+uint64(i))*2 + 1
 		if slot.turn.Load() != turn {
-			return false // Not all slots are ready
+			return dequeueEmpty // Not all slots are ready
 		}
 	}
 
 	// Try to atomically increment the tail index by n
 	if !q.tail.CompareAndSwap(tail, tail+uint64(n)) {
-		return false // Another consumer modified tail
+		return dequeueRetry // Another consumer modified tail
 	}
 
 	// Dequeue all n items
@@ -140,12 +163,12 @@ func (q *queue[T]) TryDequeueBatch(n int, yield func(item T)) bool {
 		slot.turn.Store(turn + 1)
 	}
 
-	return true
+	return dequeueOk
 }
 
-func (q *queue[T]) TryEnqueueBatch(n int, provide func() T) bool {
+func (q *queue[T]) TryEnqueueBatch(n int, provide func() T) enqueueResult {
 	if n <= 0 {
-		return false
+		return enqueueOk
 	}
 
 	// Lad the head index
@@ -157,13 +180,13 @@ func (q *queue[T]) TryEnqueueBatch(n int, provide func() T) bool {
 		slot := &q.slots[idx]
 		turn := q.turn(head+uint64(i)) * 2
 		if slot.turn.Load() != turn {
-			return false // Not all slots are ready
+			return enqueueFull // Not all slots are ready
 		}
 	}
 
 	// Try to atomically increment the head index by n
 	if !q.head.CompareAndSwap(head, head+uint64(n)) {
-		return false // Another consumer modified head
+		return enqueueRetry // Another consumer modified head
 	}
 
 	// Enqueue all n items
@@ -176,7 +199,7 @@ func (q *queue[T]) TryEnqueueBatch(n int, provide func() T) bool {
 		slot.turn.Store(turn + 1)
 	}
 
-	return true
+	return enqueueOk
 }
 
 func (q *queue[T]) All() iter.Seq[T] {
