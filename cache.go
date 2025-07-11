@@ -16,13 +16,10 @@ package otto
 
 import (
 	"encoding/binary"
-	"encoding/gob"
 	"errors"
-	"fmt"
 	"hash/maphash"
 	"io"
 	"math"
-	"os"
 	"runtime"
 	"sync/atomic"
 	"unsafe"
@@ -191,6 +188,7 @@ func (c *cache) slice(i int32) []byte {
 
 func (c *cache) Set(key string, val []byte) error {
 	if len(val) == 0 {
+
 		return ErrEmptyValue
 	}
 
@@ -201,7 +199,7 @@ func (c *cache) Set(key string, val []byte) error {
 	hash := maphash.String(c.seed, key)
 	hash += c.hashOffset.Load()
 
-	return c.set(hash, val, frequencyMin)
+	return c.set(hash, val, frequencyMin, false)
 }
 
 const (
@@ -210,7 +208,8 @@ const (
 	nilEntry     = -1
 )
 
-func (c *cache) set(hash uint64, val []byte, frequency int32) error {
+func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) error {
+
 	if _, ok := c.hashmap.LoadOrStore(hash, nilEntry); ok {
 		// Already in the cache and we don't support updates
 		return ErrAlreadyExists
@@ -252,7 +251,7 @@ func (c *cache) set(hash uint64, val []byte, frequency int32) error {
 
 	c.hashmap.Store(hash, first)
 
-	if c.g.In(hash) {
+	if useMQueue || c.g.In(hash) {
 		for !c.m.TryEnqueue(first) {
 			c.evictM()
 		}
@@ -476,127 +475,4 @@ func (c *cache) SQueueCapacity() uint64 {
 
 func (c *cache) SQueueEntries() uint64 {
 	return uint64(c.sSize.Load())
-}
-
-const serializeVersionHeader = "otto-cache-1.0.0"
-
-type serializedEntry struct {
-	Key   uint64
-	Value []byte
-	Freq  int32
-}
-
-func (c *cache) Serialize(w io.Writer) error {
-	e := gob.NewEncoder(w)
-
-	if err := e.Encode(serializeVersionHeader); err != nil {
-		return fmt.Errorf("failed to encode version header: %w", err)
-	}
-
-	seed := *(*uint64)(unsafe.Pointer(&c.seed))
-	if err := e.Encode(seed); err != nil {
-		return fmt.Errorf("failed to encode seed: %w", err)
-	}
-
-	err := c.hashmap.Range(func(k uint64, v int32) error {
-		se := serializedEntry{
-			Key:   k,
-			Value: c.read(v, nil),
-			Freq:  c.eFreq[v].Load(),
-		}
-
-		return e.Encode(se)
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to encode entry: %w", err)
-	}
-
-	return err
-}
-
-// Deserialize deserializes the cache from a byte stream.
-// Refer to the New method for the usage of slotSize & slotCount arguments.
-func Deserialize(r io.Reader, slotSize, slotCount int32) (Cache, error) {
-	mCapacity, sCapacity := defaultEx(slotCount)
-	return DeserializeEx(r, slotSize, mCapacity, sCapacity)
-}
-
-// DeserializeEx deserializes the cache from a byte stream.
-// Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
-func DeserializeEx(r io.Reader, slotSize, mCap, sCap int32) (Cache, error) {
-	d := gob.NewDecoder(r)
-
-	var versionHeader string
-	if err := d.Decode(&versionHeader); err != nil {
-		return nil, fmt.Errorf("failed to decode version header: %w", err)
-	}
-
-	if versionHeader != serializeVersionHeader {
-		return nil, fmt.Errorf("unsupported version header: %s", versionHeader)
-	}
-
-	var rawSeed uint64
-	if err := d.Decode(&rawSeed); err != nil {
-		return nil, fmt.Errorf("failed to decode seed: %w", err)
-	}
-
-	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
-
-	c := NewEx(slotSize, mCap, sCap).(*cache)
-	c.seed = seed
-
-	for {
-		var se serializedEntry
-		if err := d.Decode(&se); err != nil {
-			if err == io.EOF {
-				break // End of stream
-			}
-
-			return nil, fmt.Errorf("failed to decode entry: %w", err)
-		}
-
-		clampedFreq := max(min(se.Freq, frequencyMax), frequencyMin)
-
-		c.set(se.Key, se.Value, clampedFreq)
-	}
-
-	return c, nil
-}
-
-// SaveToFile serializes the cache as a file in the provided path.
-func SaveToFile(c Cache, path string) error {
-	file, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-
-	if err := c.Serialize(file); err != nil {
-		return fmt.Errorf("failed to serialize to file: %w", err)
-	}
-
-	return file.Close()
-}
-
-// LoadFromFile deserializes the cache from the file at the provided path.
-// Refer to the New method for the usage of slotSize & slotCount arguments.
-func LoadFromFile(path string, slotSize, slotCount int32) (Cache, error) {
-	mCap, sCap := defaultEx(slotCount)
-	return LoadFromFileEx(path, slotSize, mCap, sCap)
-}
-
-// LoadFromFileEx deserializes the cache from the file at the provided path.
-// Refer to the NewEx method for the usage of slotSize & mCap & sCap arguments.
-func LoadFromFileEx(path string, slotSize, mCap, sCap int32) (Cache, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-
-	cache, err := DeserializeEx(file, slotSize, mCap, sCap)
-	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize from file: %w", err)
-	}
-
-	return cache, file.Close()
 }

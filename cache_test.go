@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/maphash"
 	"math/rand/v2"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 )
 
 func newCache(tb testing.TB, slotSize, mCapacity, sCapacity int32) Cache {
@@ -207,6 +209,151 @@ func TestSerialize(t *testing.T) {
 	}
 	cacheHit(t, c, 0, 1)
 	cacheHit(t, c, 1, 2)
+}
+
+func TestSerializeEmpty(t *testing.T) {
+	c := defaultCache(t)
+	var buf bytes.Buffer
+	err := c.Serialize(&buf)
+	if err != nil {
+		t.Fatalf("failed to serialize cache: %v", err)
+	}
+
+	c, err = DeserializeEx(&buf, testSlotSize, testMCapacity, testSCapacity)
+	if err != nil {
+		t.Fatalf("failed to deserialize cache: %v", err)
+	}
+	cacheMiss(t, c, 0)
+}
+
+func TestV100Serialize(t *testing.T) {
+	c := defaultCache(t)
+	cacheSet(t, c, 0, 1)
+	cacheSet(t, c, 1, 2)
+	var buf bytes.Buffer
+	err := c.(*cache).SerializeV100(&buf)
+	if err != nil {
+		t.Fatalf("failed to serialize cache v100: %v", err)
+	}
+
+	c, err = DeserializeEx(&buf, testSlotSize, testMCapacity, testSCapacity)
+	if err != nil {
+		t.Fatalf("failed to deserialize cache V100: %v", err)
+	}
+	cacheHit(t, c, 0, 1)
+	cacheHit(t, c, 1, 2)
+}
+
+func TestSerializeComplexCache(t *testing.T) {
+	const (
+		testSlotSize  = 16
+		testMCapacity = 100
+		testSCapacity = 50
+		prepareRounds = 60000
+		maxKeys       = 5000
+		maxSlots      = 8
+	)
+
+	c := newCache(t, testSlotSize, testMCapacity, testSCapacity)
+	r := rng(0)
+	rawSeed := r.Uint64()
+	seed := *(*maphash.Seed)(unsafe.Pointer(&rawSeed))
+
+	// Add some random entries to the ghost cache
+	for i := 0; i < prepareRounds/10; i++ {
+		keyIdx := int(r.Uint64() % maxKeys)
+		cacheSet(t, c, keyIdx, keySlots(seed, keyIdx, maxSlots))
+	}
+
+	// Run some random insertion / read rounds to have a complex cache state
+	for i := 0; i < prepareRounds; i++ {
+		keyIdx := int(r.Uint64() % maxKeys)
+		// 1/2 of operations are read
+		if r.Uint64()%2 == 0 {
+			cacheSet(t, c, keyIdx, keySlots(seed, keyIdx, maxSlots))
+		} else {
+			c.Get(key(keyIdx), nil)
+		}
+	}
+
+	// Record all entries that should be present in the cache
+	// We'll check these after serialization/deserialization
+	expectedEntries := make(map[string]int) // key -> expected slots
+
+	// Check which entries are actually in the cache and record them
+	for i := 0; i < maxKeys; i++ {
+		key := key(i)
+		if c.Has(key) {
+			expectedEntries[key] = keySlots(seed, i, maxSlots)
+		}
+	}
+
+	// Verify we have a reasonable number of entries
+	if len(expectedEntries) == 0 {
+		t.Fatal("no entries found in cache before serialization")
+	}
+
+	t.Logf("Cache has %d entries before serialization", len(expectedEntries))
+
+	// Serialize the cache
+	var buf bytes.Buffer
+	err := c.Serialize(&buf)
+	if err != nil {
+		t.Fatalf("failed to serialize cache: %v", err)
+	}
+
+	// Deserialize the cache
+	deserializedCache, err := DeserializeEx(&buf, testSlotSize, testMCapacity, testSCapacity)
+	if err != nil {
+		t.Fatalf("failed to deserialize cache: %v", err)
+	}
+
+	// Verify all expected entries are still present with correct values
+	for key, expectedSlots := range expectedEntries {
+		expectedValue := value(extractKeyNumber(key), expectedSlots)
+		actualValue := deserializedCache.Get(key, nil)
+
+		if actualValue == nil {
+			t.Errorf("entry %s missing after deserialization", key)
+			continue
+		}
+
+		if !bytes.Equal(actualValue, expectedValue) {
+			t.Errorf("entry %s has wrong value after deserialization: expected %x, got %x",
+				key, expectedValue, actualValue)
+		}
+	}
+
+	// Also verify that entries that weren't in the cache before are still not there
+	for i := 0; i < maxKeys; i++ {
+		key := key(i)
+		if _, exists := expectedEntries[key]; !exists && deserializedCache.Has(key) {
+			t.Errorf("unexpected entry %s found after deserialization", key)
+		}
+	}
+
+	// Verify ghost cache was also serialized
+	originalGhostBits := c.(*cache).g.filter.bits
+	deserializedGhostBits := deserializedCache.(*cache).g.filter.bits
+	if !bytes.Equal(originalGhostBits, deserializedGhostBits) {
+		t.Errorf("ghost bits have wrong value after deserialization: expected %x, got %x", originalGhostBits, deserializedGhostBits)
+	}
+
+	t.Logf("Successfully verified %d entries preserved after serialization/deserialization", len(expectedEntries))
+}
+
+func keySlots(seed maphash.Seed, key int, maxSlots int) int {
+	var n int64 = int64(key)
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint32(buf, uint32(n))
+	return int(maphash.Bytes(seed, buf) % uint64(maxSlots))
+}
+
+// extractKeyNumber extracts the number from a key like "key-123"
+func extractKeyNumber(key string) int {
+	var num int
+	fmt.Sscanf(key, "key-%d", &num)
+	return num
 }
 
 func BenchmarkConcurrentGet(b *testing.B) {

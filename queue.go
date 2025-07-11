@@ -18,6 +18,7 @@
 package otto
 
 import (
+	"iter"
 	"sync/atomic"
 	"unsafe"
 )
@@ -176,6 +177,30 @@ func (q *queue[T]) TryEnqueueBatch(n int, provide func() T) bool {
 	}
 
 	return true
+}
+
+func (q *queue[T]) All() iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for i := q.tail.Load(); i != q.head.Load(); i++ {
+			if !yield(q.slots[q.idx(i)].item) {
+				return
+			}
+		}
+	}
+}
+
+func (q *queue[T]) Len() int {
+	head := q.head.Load()
+	tail := q.tail.Load()
+
+	if head == tail {
+		if q.slots[q.idx(head)].turn == q.slots[q.idx(tail)].turn {
+			return 0
+		}
+		return 1
+	}
+
+	return int(head - tail)
 }
 
 func (q *queue[T]) idx(i uint64) uint64 {
