@@ -174,7 +174,7 @@ func NewEx(slotSize, mCap, sCap int32) Cache {
 	}
 
 	for i := range c.slotCap {
-		if !c.alloc.TryEnqueue(i) {
+		if c.alloc.TryEnqueue(i) != enqueueOk {
 			panic("otto: invariant violated: failed to enqueue on empty alloc queue")
 		}
 	}
@@ -224,22 +224,27 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 	}
 
 	var (
-		first  int32 = -1
-		prev   int32
-		offset int
+		first   int32 = -1
+		prev    int32
+		offset  int
+		dequeue dequeueResult
 	)
 
-	for !c.alloc.TryDequeueBatch(int(slots), func(i int32) {
-		if first == -1 {
-			first = i
-		} else {
-			binary.NativeEndian.PutUint32(c.slice(prev), uint32(i))
-		}
+	for try := true; try; try = (dequeue != dequeueOk) {
+		dequeue = c.alloc.TryDequeueBatch(int(slots), func(i int32) {
+			if first == -1 {
+				first = i
+			} else {
+				binary.NativeEndian.PutUint32(c.slice(prev), uint32(i))
+			}
 
-		offset += copy(c.slice(i)[headerSize:], val[offset:])
-		prev = i
-	}) {
-		c.evict()
+			offset += copy(c.slice(i)[headerSize:], val[offset:])
+			prev = i
+		})
+
+		if dequeue == dequeueEmpty {
+			c.evict()
+		}
 	}
 
 	c.eAccess[first].Store(0)
@@ -251,14 +256,22 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 
 	c.hashmap.Store(hash, first)
 
+	var enqueue enqueueResult
+
 	if useMQueue || c.g.In(hash) {
-		for !c.m.TryEnqueue(first) {
-			c.evictM()
+		for try := true; try; try = (enqueue != enqueueOk) {
+			enqueue = c.m.TryEnqueue(first)
+			if enqueue == enqueueFull {
+				c.evictM()
+			}
 		}
 		c.mSize.Add(int64(slots))
 	} else {
-		for !c.s.TryEnqueue(first) {
-			c.evictS()
+		for try := true; try; try = (enqueue != enqueueOk) {
+			enqueue = c.s.TryEnqueue(first)
+			if enqueue == enqueueFull {
+				c.evictS()
+			}
 		}
 		c.sSize.Add(int64(slots))
 	}
@@ -325,57 +338,78 @@ func (c *cache) evict() {
 }
 
 func (c *cache) evictS() {
-	e, ok := c.s.TryDequeue()
-	for ok {
-		slots := int64(cost(c.slotSize, c.eSize[e]))
+	var (
+		entry   int32
+		dequeue dequeueResult
+	)
 
-		c.sSize.Add(-slots)
+	for try := true; try; try = (dequeue != dequeueEmpty) {
+		entry, dequeue = c.s.TryDequeue()
+		if dequeue == dequeueOk {
+			slots := int64(cost(c.slotSize, c.eSize[entry]))
 
-		// Small variation from the S3-FIFO algorithm. If a value of
-		// frequency 0 is concurrently accessed as the eviction runs
-		// it will have a frequency of 1 and it will still get promoted
-		// to the m-queue.
-		if c.eFreq[e].Load() <= 1 && c.eAccess[e].CompareAndSwap(0, math.MinInt32) {
-			c.g.Add(c.eHash[e])
-			c.evictEntry(e)
-			return
+			c.sSize.Add(-slots)
+
+			// Small variation from the S3-FIFO algorithm. If a value of
+			// frequency 0 is concurrently accessed as the eviction runs
+			// it will have a frequency of 1 and it will still get promoted
+			// to the m-queue.
+			if c.eFreq[entry].Load() <= 1 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
+				c.g.Add(c.eHash[entry])
+				c.evictEntry(entry)
+				return
+			}
+
+			var enqueue enqueueResult
+			for tryEnqueue := true; tryEnqueue; tryEnqueue = (enqueue != enqueueOk) {
+				enqueue = c.m.TryEnqueue(entry)
+				if enqueue == enqueueFull {
+					c.evictM()
+				}
+			}
+
+			c.mSize.Add(slots)
 		}
-
-		for !c.m.TryEnqueue(e) {
-			c.evictM()
-		}
-		c.mSize.Add(slots)
-
-		e, ok = c.s.TryDequeue()
 	}
 }
 
 func (c *cache) evictM() {
-	e, ok := c.m.TryDequeue()
-	for ok {
-		slots := int64(cost(c.slotSize, c.eSize[e]))
+	var (
+		entry   int32
+		dequeue dequeueResult
+	)
 
-		c.mSize.Add(-slots)
+	for try := true; try; try = (dequeue != dequeueEmpty) {
+		entry, dequeue = c.m.TryDequeue()
+		if dequeue == dequeueOk {
+			slots := int64(cost(c.slotSize, c.eSize[entry]))
 
-		if c.eFreq[e].Load() <= 0 && c.eAccess[e].CompareAndSwap(0, math.MinInt32) {
-			c.evictEntry(e)
-			return
-		}
+			c.mSize.Add(-slots)
 
-		for {
-			freq := c.eFreq[e].Load()
-
-			if c.eFreq[e].CompareAndSwap(freq, max(0, freq-1)) {
-				for !c.m.TryEnqueue(e) {
-					c.evictM()
-				}
-				c.mSize.Add(slots)
-
-				break
+			if c.eFreq[entry].Load() <= 0 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
+				c.evictEntry(entry)
+				return
 			}
-		}
 
-		e, ok = c.m.TryDequeue()
+			for {
+				freq := c.eFreq[entry].Load()
+
+				if c.eFreq[entry].CompareAndSwap(freq, max(0, freq-1)) {
+					var enqueue enqueueResult
+					for tryEnqueue := true; tryEnqueue; tryEnqueue = (enqueue != enqueueOk) {
+						enqueue = c.m.TryEnqueue(entry)
+						if enqueue == enqueueFull {
+							c.evictM()
+						}
+					}
+
+					c.mSize.Add(slots)
+
+					break
+				}
+			}
+
+		}
 	}
 }
 
@@ -395,12 +429,12 @@ func (c *cache) evictEntry(e int32) {
 	prev := e
 
 	var next, current int32
-	for !c.alloc.TryEnqueueBatch(int(slots), func() int32 {
+	for c.alloc.TryEnqueueBatch(int(slots), func() int32 {
 		next = int32(binary.NativeEndian.Uint32(c.slice(prev)))
 		current = prev
 		prev = next
 		return current
-	}) {
+	}) != enqueueOk {
 		runtime.Gosched()
 	}
 
