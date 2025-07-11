@@ -224,14 +224,14 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 	}
 
 	var (
-		first   int32 = -1
-		prev    int32
-		offset  int
-		dequeue dequeueResult
+		first  int32 = -1
+		prev   int32
+		offset int
+		deqRes dequeueResult
 	)
 
-	for try := true; try; try = (dequeue != dequeueOk) {
-		dequeue = c.alloc.TryDequeueBatch(int(slots), func(i int32) {
+	for tryDeq := true; tryDeq; tryDeq = (deqRes != dequeueOk) {
+		deqRes = c.alloc.TryDequeueBatch(int(slots), func(i int32) {
 			if first == -1 {
 				first = i
 			} else {
@@ -242,7 +242,7 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 			prev = i
 		})
 
-		if dequeue == dequeueEmpty {
+		if deqRes == dequeueEmpty {
 			c.evict()
 		}
 	}
@@ -256,20 +256,19 @@ func (c *cache) set(hash uint64, val []byte, frequency int32, useMQueue bool) er
 
 	c.hashmap.Store(hash, first)
 
-	var enqueue enqueueResult
-
+	var enqRes enqueueResult
 	if useMQueue || c.g.In(hash) {
-		for try := true; try; try = (enqueue != enqueueOk) {
-			enqueue = c.m.TryEnqueue(first)
-			if enqueue == enqueueFull {
+		for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+			enqRes = c.m.TryEnqueue(first)
+			if enqRes == enqueueFull {
 				c.evictM()
 			}
 		}
 		c.mSize.Add(int64(slots))
 	} else {
-		for try := true; try; try = (enqueue != enqueueOk) {
-			enqueue = c.s.TryEnqueue(first)
-			if enqueue == enqueueFull {
+		for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+			enqRes = c.s.TryEnqueue(first)
+			if enqRes == enqueueFull {
 				c.evictS()
 			}
 		}
@@ -339,76 +338,79 @@ func (c *cache) evict() {
 
 func (c *cache) evictS() {
 	var (
-		entry   int32
-		dequeue dequeueResult
+		entry  int32
+		deqRes dequeueResult
 	)
 
-	for try := true; try; try = (dequeue != dequeueEmpty) {
-		entry, dequeue = c.s.TryDequeue()
-		if dequeue == dequeueOk {
-			slots := int64(cost(c.slotSize, c.eSize[entry]))
-
-			c.sSize.Add(-slots)
-
-			// Small variation from the S3-FIFO algorithm. If a value of
-			// frequency 0 is concurrently accessed as the eviction runs
-			// it will have a frequency of 1 and it will still get promoted
-			// to the m-queue.
-			if c.eFreq[entry].Load() <= 1 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
-				c.g.Add(c.eHash[entry])
-				c.evictEntry(entry)
-				return
-			}
-
-			var enqueue enqueueResult
-			for tryEnqueue := true; tryEnqueue; tryEnqueue = (enqueue != enqueueOk) {
-				enqueue = c.m.TryEnqueue(entry)
-				if enqueue == enqueueFull {
-					c.evictM()
-				}
-			}
-
-			c.mSize.Add(slots)
+	for tryDeq := true; tryDeq; tryDeq = (deqRes != dequeueEmpty) {
+		entry, deqRes = c.s.TryDequeue()
+		if deqRes != dequeueOk {
+			continue
 		}
+
+		slots := int64(cost(c.slotSize, c.eSize[entry]))
+
+		c.sSize.Add(-slots)
+
+		// Small variation from the S3-FIFO algorithm. If a value of
+		// frequency 0 is concurrently accessed as the eviction runs
+		// it will have a frequency of 1 and it will still get promoted
+		// to the m-queue.
+		if c.eFreq[entry].Load() <= 1 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
+			c.g.Add(c.eHash[entry])
+			c.evictEntry(entry)
+			return
+		}
+
+		var enqRes enqueueResult
+		for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+			enqRes = c.m.TryEnqueue(entry)
+			if enqRes == enqueueFull {
+				c.evictM()
+			}
+		}
+
+		c.mSize.Add(slots)
 	}
 }
 
 func (c *cache) evictM() {
 	var (
-		entry   int32
-		dequeue dequeueResult
+		entry  int32
+		deqRes dequeueResult
 	)
 
-	for try := true; try; try = (dequeue != dequeueEmpty) {
-		entry, dequeue = c.m.TryDequeue()
-		if dequeue == dequeueOk {
-			slots := int64(cost(c.slotSize, c.eSize[entry]))
+	for tryDeq := true; tryDeq; tryDeq = (deqRes != dequeueEmpty) {
+		entry, deqRes = c.m.TryDequeue()
+		if deqRes != dequeueOk {
+			continue
+		}
 
-			c.mSize.Add(-slots)
+		slots := int64(cost(c.slotSize, c.eSize[entry]))
 
-			if c.eFreq[entry].Load() <= 0 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
-				c.evictEntry(entry)
-				return
-			}
+		c.mSize.Add(-slots)
 
-			for {
-				freq := c.eFreq[entry].Load()
+		if c.eFreq[entry].Load() <= 0 && c.eAccess[entry].CompareAndSwap(0, math.MinInt32) {
+			c.evictEntry(entry)
+			return
+		}
 
-				if c.eFreq[entry].CompareAndSwap(freq, max(0, freq-1)) {
-					var enqueue enqueueResult
-					for tryEnqueue := true; tryEnqueue; tryEnqueue = (enqueue != enqueueOk) {
-						enqueue = c.m.TryEnqueue(entry)
-						if enqueue == enqueueFull {
-							c.evictM()
-						}
+		for {
+			freq := c.eFreq[entry].Load()
+
+			if c.eFreq[entry].CompareAndSwap(freq, max(0, freq-1)) {
+				var enqRes enqueueResult
+				for tryEnq := true; tryEnq; tryEnq = (enqRes != enqueueOk) {
+					enqRes = c.m.TryEnqueue(entry)
+					if enqRes == enqueueFull {
+						c.evictM()
 					}
-
-					c.mSize.Add(slots)
-
-					break
 				}
-			}
 
+				c.mSize.Add(slots)
+
+				break
+			}
 		}
 	}
 }
