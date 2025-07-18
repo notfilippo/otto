@@ -156,7 +156,7 @@ func NewEx(slotSize, mCap, sCap int32) Cache {
 	slotCap := mCap + sCap
 
 	c := &cache{
-		data:     make([]byte, slotCap*slotSize),
+		data:     make([]byte, int(slotCap)*int(slotSize)),
 		eAccess:  make([]atomic.Int32, slotCap),
 		eFreq:    make([]atomic.Int32, slotCap),
 		eSize:    make([]int32, slotCap),
